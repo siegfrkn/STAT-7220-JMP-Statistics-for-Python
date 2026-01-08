@@ -9,6 +9,14 @@ matplotlib/seaborn for visualization.
 Installation Requirements:
     pip install numpy pandas scipy statsmodels matplotlib seaborn
 
+NEW IN v1.3:
+    - train_test_split(): Split data into training and test sets
+    - validate_model(): Train on training data, evaluate on both train/test
+    - compare_models(): Compare multiple feature sets on train/test
+    - compare_all_criteria(): Run all stepwise criteria and compare on test data
+    - plot_train_test_comparison(): Visualize train vs test performance
+    - plot_model_comparison(): Visualize model comparisons
+
 NEW IN v1.2:
     - covariate_combinations(): Generate all interaction and polynomial terms
     - full_factorial_design(): Create full factorial design matrices  
@@ -36,10 +44,41 @@ Usage Examples:
     results = linear_regression(df['y'], df[['x1', 'x2']])
     print(results)
     
-    hat_results = hat_matrix(df['y'], df[['x1', 'x2']])
-    print(hat_results)
+    # =====================
+    # TRAIN/TEST VALIDATION
+    # =====================
     
-    # Stepwise regression with different criteria
+    from jmp_stats import train_test_split, validate_model, compare_models
+    
+    # Split data
+    split = jmp.train_test_split(df['y'], df[predictors], test_size=0.2, random_state=42)
+    print(split)  # Shows train/test sizes
+    
+    # Validate a single model
+    results = jmp.validate_model(split.y_train, split.X_train,
+                                 split.y_test, split.X_test,
+                                 model_name="Full Model")
+    print(results)  # Shows train vs test metrics
+    
+    # Compare multiple models
+    models = {
+        'Full Model': list(predictors),
+        'Stepwise BIC': step_bic.selected_features,
+        'Stepwise AIC': step_aic.selected_features,
+    }
+    comparison = jmp.compare_models(split.y_train, split.X_train,
+                                    split.y_test, split.X_test, models)
+    print(comparison)
+    
+    # One-liner: compare all stepwise criteria
+    comparison = jmp.compare_all_criteria(df['y'], df[predictors], 
+                                          test_size=0.2, random_state=42)
+    jmp.plot_model_comparison(comparison)
+    
+    # =====================
+    # STEPWISE REGRESSION
+    # =====================
+    
     # Using BIC (default)
     step_bic = stepwise_regression_enhanced(df['y'], df[predictors], 
                                             direction='both', criterion='bic')
@@ -57,7 +96,10 @@ Usage Examples:
     subsets = subset_regression(df['y'], df[predictors], max_vars=10)
     print(subsets.best_overall)
 
-    # Generate covariate combinations for regression modeling
+    # =====================
+    # COVARIATE COMBINATIONS
+    # =====================
+    
     from jmp_stats import covariate_combinations
     
     # Create all pairwise interactions
@@ -2965,16 +3007,682 @@ def polynomial_features(
 
 
 # =============================================================================
+# TRAIN/TEST SPLIT AND MODEL VALIDATION
+# =============================================================================
+
+@dataclass
+class TrainTestSplit:
+    """Container for train/test split data."""
+    X_train: pd.DataFrame
+    X_test: pd.DataFrame
+    y_train: pd.Series
+    y_test: pd.Series
+    train_indices: np.ndarray
+    test_indices: np.ndarray
+    train_size: int
+    test_size: int
+    test_ratio: float
+    
+    def __str__(self):
+        return f"""
+Train/Test Split
+================
+Total Observations:  {self.train_size + self.test_size}
+Training Set:        {self.train_size} ({100*(1-self.test_ratio):.1f}%)
+Test Set:            {self.test_size} ({100*self.test_ratio:.1f}%)
+Features:            {len(self.X_train.columns)}
+"""
+
+
+@dataclass
+class ModelValidationResults:
+    """Container for model validation results comparing train vs test performance."""
+    model_name: str
+    selected_features: List[str]
+    
+    # Training metrics
+    train_r_squared: float
+    train_adj_r_squared: float
+    train_rmse: float
+    train_mae: float
+    train_mape: float
+    
+    # Test metrics
+    test_r_squared: float
+    test_adj_r_squared: float
+    test_rmse: float
+    test_mae: float
+    test_mape: float
+    
+    # Comparison metrics
+    r_squared_diff: float
+    rmse_diff: float
+    rmse_pct_increase: float
+    overfit_warning: bool
+    
+    # Stored data for plotting
+    train_actual: np.ndarray = field(default_factory=lambda: np.array([]))
+    train_predicted: np.ndarray = field(default_factory=lambda: np.array([]))
+    test_actual: np.ndarray = field(default_factory=lambda: np.array([]))
+    test_predicted: np.ndarray = field(default_factory=lambda: np.array([]))
+    
+    # Full model object
+    train_model: Optional[Any] = None
+    
+    def __str__(self):
+        overfit_msg = "⚠️  POSSIBLE OVERFITTING" if self.overfit_warning else "✓ Model generalizes well"
+        return f"""
+Model Validation Results: {self.model_name}
+{'=' * (27 + len(self.model_name))}
+Features: {len(self.selected_features)}
+{', '.join(self.selected_features[:5])}{'...' if len(self.selected_features) > 5 else ''}
+
+                    Training        Test          Difference
+                    --------        ----          ----------
+R-Squared           {self.train_r_squared:8.4f}        {self.test_r_squared:8.4f}        {self.r_squared_diff:+8.4f}
+Adj R-Squared       {self.train_adj_r_squared:8.4f}        {self.test_adj_r_squared:8.4f}
+RMSE                {self.train_rmse:8.4f}        {self.test_rmse:8.4f}        {self.rmse_diff:+8.4f} ({self.rmse_pct_increase:+.1f}%)
+MAE                 {self.train_mae:8.4f}        {self.test_mae:8.4f}
+MAPE                {self.train_mape:8.2f}%       {self.test_mape:8.2f}%
+
+{overfit_msg}
+"""
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """Return metrics as a DataFrame."""
+        return pd.DataFrame({
+            'Metric': ['R-Squared', 'Adj R-Squared', 'RMSE', 'MAE', 'MAPE (%)'],
+            'Training': [self.train_r_squared, self.train_adj_r_squared, 
+                        self.train_rmse, self.train_mae, self.train_mape],
+            'Test': [self.test_r_squared, self.test_adj_r_squared,
+                    self.test_rmse, self.test_mae, self.test_mape],
+            'Difference': [self.r_squared_diff, np.nan, self.rmse_diff, np.nan, np.nan]
+        })
+
+
+@dataclass
+class ModelComparisonResults:
+    """Container for comparing multiple models on train/test data."""
+    model_results: List[ModelValidationResults]
+    comparison_df: pd.DataFrame
+    best_model_by_test_rmse: str
+    best_model_by_test_r2: str
+    
+    def __str__(self):
+        return f"""
+Model Comparison Summary
+========================
+Models Compared: {len(self.model_results)}
+Best by Test RMSE: {self.best_model_by_test_rmse}
+Best by Test R²:   {self.best_model_by_test_r2}
+
+{self.comparison_df.to_string()}
+"""
+
+
+def train_test_split(
+    y: Union[pd.Series, np.ndarray],
+    X: pd.DataFrame,
+    test_size: float = 0.2,
+    random_state: Optional[int] = None,
+    shuffle: bool = True,
+    stratify: bool = False
+) -> TrainTestSplit:
+    """
+    Split data into training and test sets.
+    
+    Parameters
+    ----------
+    y : array-like
+        Response/target variable.
+    X : DataFrame
+        Predictor variables.
+    test_size : float, default=0.2
+        Proportion of data to use for testing (0.0 to 1.0).
+    random_state : int, optional
+        Random seed for reproducibility.
+    shuffle : bool, default=True
+        Whether to shuffle data before splitting.
+    stratify : bool, default=False
+        If True, preserves the distribution of y in both sets.
+        Only works for categorical/discrete y.
+        
+    Returns
+    -------
+    TrainTestSplit
+        Dataclass containing X_train, X_test, y_train, y_test and metadata.
+        
+    Example
+    -------
+    >>> split = train_test_split(df['y'], df[predictors], test_size=0.2, random_state=42)
+    >>> print(split)
+    >>> model = linear_regression(split.y_train, split.X_train)
+    """
+    # Convert to proper types
+    if isinstance(y, np.ndarray):
+        y = pd.Series(y)
+    if isinstance(X, np.ndarray):
+        X = pd.DataFrame(X)
+    
+    # Handle missing values
+    valid_idx = ~(y.isna() | X.isna().any(axis=1))
+    y_clean = y[valid_idx].reset_index(drop=True)
+    X_clean = X[valid_idx].reset_index(drop=True)
+    
+    n = len(y_clean)
+    n_test = int(n * test_size)
+    n_train = n - n_test
+    
+    if random_state is not None:
+        np.random.seed(random_state)
+    
+    indices = np.arange(n)
+    
+    if shuffle:
+        if stratify and y_clean.nunique() < 20:  # Only stratify for discrete y
+            # Stratified split
+            test_indices = []
+            for val in y_clean.unique():
+                val_indices = indices[y_clean == val]
+                n_val_test = max(1, int(len(val_indices) * test_size))
+                test_indices.extend(np.random.choice(val_indices, n_val_test, replace=False))
+            test_indices = np.array(test_indices)
+            train_indices = np.setdiff1d(indices, test_indices)
+        else:
+            np.random.shuffle(indices)
+            test_indices = indices[:n_test]
+            train_indices = indices[n_test:]
+    else:
+        # No shuffle - use last portion as test (common for time series)
+        train_indices = indices[:n_train]
+        test_indices = indices[n_train:]
+    
+    return TrainTestSplit(
+        X_train=X_clean.iloc[train_indices].reset_index(drop=True),
+        X_test=X_clean.iloc[test_indices].reset_index(drop=True),
+        y_train=y_clean.iloc[train_indices].reset_index(drop=True),
+        y_test=y_clean.iloc[test_indices].reset_index(drop=True),
+        train_indices=train_indices,
+        test_indices=test_indices,
+        train_size=len(train_indices),
+        test_size=len(test_indices),
+        test_ratio=test_size
+    )
+
+
+def validate_model(
+    y_train: Union[pd.Series, np.ndarray],
+    X_train: pd.DataFrame,
+    y_test: Union[pd.Series, np.ndarray],
+    X_test: pd.DataFrame,
+    features: Optional[List[str]] = None,
+    model_name: str = "Model"
+) -> ModelValidationResults:
+    """
+    Train a model on training data and evaluate on both train and test sets.
+    
+    Parameters
+    ----------
+    y_train : array-like
+        Training response variable.
+    X_train : DataFrame
+        Training predictors.
+    y_test : array-like
+        Test response variable.
+    X_test : DataFrame
+        Test predictors.
+    features : list of str, optional
+        Specific features to use. If None, uses all columns in X_train.
+    model_name : str, default="Model"
+        Name for identifying this model in comparisons.
+        
+    Returns
+    -------
+    ModelValidationResults
+        Dataclass with train/test metrics and comparison.
+        
+    Example
+    -------
+    >>> split = train_test_split(df['y'], df[predictors], test_size=0.2)
+    >>> results = validate_model(split.y_train, split.X_train, 
+    ...                          split.y_test, split.X_test,
+    ...                          model_name="Full Model")
+    >>> print(results)
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels required for validate_model")
+    
+    # Select features
+    if features is None:
+        features = list(X_train.columns)
+    
+    X_train_subset = X_train[features]
+    X_test_subset = X_test[features]
+    
+    # Convert to arrays
+    y_train_arr = np.asarray(y_train).flatten()
+    y_test_arr = np.asarray(y_test).flatten()
+    
+    # Fit model on training data
+    X_train_const = sm.add_constant(X_train_subset)
+    model = sm.OLS(y_train_arr, X_train_const).fit()
+    
+    # Training predictions and metrics
+    train_pred = model.predict(X_train_const)
+    train_resid = y_train_arr - train_pred
+    train_rmse = np.sqrt(np.mean(train_resid**2))
+    train_mae = np.mean(np.abs(train_resid))
+    train_ss_tot = np.sum((y_train_arr - np.mean(y_train_arr))**2)
+    train_ss_res = np.sum(train_resid**2)
+    train_r2 = 1 - (train_ss_res / train_ss_tot)
+    n_train = len(y_train_arr)
+    p = len(features)
+    train_adj_r2 = 1 - (1 - train_r2) * (n_train - 1) / (n_train - p - 1)
+    
+    # Avoid division by zero for MAPE
+    nonzero_train = y_train_arr != 0
+    if np.any(nonzero_train):
+        train_mape = np.mean(np.abs(train_resid[nonzero_train] / y_train_arr[nonzero_train])) * 100
+    else:
+        train_mape = np.nan
+    
+    # Test predictions and metrics
+    X_test_const = sm.add_constant(X_test_subset, has_constant='add')
+    test_pred = model.predict(X_test_const)
+    test_resid = y_test_arr - test_pred
+    test_rmse = np.sqrt(np.mean(test_resid**2))
+    test_mae = np.mean(np.abs(test_resid))
+    test_ss_tot = np.sum((y_test_arr - np.mean(y_test_arr))**2)
+    test_ss_res = np.sum(test_resid**2)
+    test_r2 = 1 - (test_ss_res / test_ss_tot)
+    n_test = len(y_test_arr)
+    test_adj_r2 = 1 - (1 - test_r2) * (n_test - 1) / (n_test - p - 1)
+    
+    nonzero_test = y_test_arr != 0
+    if np.any(nonzero_test):
+        test_mape = np.mean(np.abs(test_resid[nonzero_test] / y_test_arr[nonzero_test])) * 100
+    else:
+        test_mape = np.nan
+    
+    # Comparison metrics
+    r2_diff = test_r2 - train_r2
+    rmse_diff = test_rmse - train_rmse
+    rmse_pct_increase = (rmse_diff / train_rmse) * 100 if train_rmse > 0 else 0
+    
+    # Overfit warning if test RMSE is significantly higher than train RMSE
+    overfit_warning = rmse_pct_increase > 20 or r2_diff < -0.1
+    
+    return ModelValidationResults(
+        model_name=model_name,
+        selected_features=features,
+        train_r_squared=float(train_r2),
+        train_adj_r_squared=float(train_adj_r2),
+        train_rmse=float(train_rmse),
+        train_mae=float(train_mae),
+        train_mape=float(train_mape),
+        test_r_squared=float(test_r2),
+        test_adj_r_squared=float(test_adj_r2),
+        test_rmse=float(test_rmse),
+        test_mae=float(test_mae),
+        test_mape=float(test_mape),
+        r_squared_diff=float(r2_diff),
+        rmse_diff=float(rmse_diff),
+        rmse_pct_increase=float(rmse_pct_increase),
+        overfit_warning=overfit_warning,
+        train_actual=y_train_arr,
+        train_predicted=train_pred,
+        test_actual=y_test_arr,
+        test_predicted=test_pred,
+        train_model=model
+    )
+
+
+def compare_models(
+    y_train: Union[pd.Series, np.ndarray],
+    X_train: pd.DataFrame,
+    y_test: Union[pd.Series, np.ndarray],
+    X_test: pd.DataFrame,
+    feature_sets: Dict[str, List[str]],
+    verbose: bool = True
+) -> ModelComparisonResults:
+    """
+    Compare multiple models (feature sets) on train/test data.
+    
+    Parameters
+    ----------
+    y_train : array-like
+        Training response variable.
+    X_train : DataFrame
+        Training predictors (should contain all features from all feature_sets).
+    y_test : array-like
+        Test response variable.
+    X_test : DataFrame
+        Test predictors.
+    feature_sets : dict
+        Dictionary mapping model names to lists of feature names.
+        Example: {'Full': ['x1','x2','x3'], 'Reduced': ['x1','x2']}
+    verbose : bool, default=True
+        Print progress.
+        
+    Returns
+    -------
+    ModelComparisonResults
+        Dataclass with comparison DataFrame and best models.
+        
+    Example
+    -------
+    >>> split = train_test_split(df['y'], df[predictors])
+    >>> models = {
+    ...     'Full Model': predictors,
+    ...     'Stepwise': step.selected_features,
+    ...     'Simple': ['x1', 'x2']
+    ... }
+    >>> comparison = compare_models(split.y_train, split.X_train,
+    ...                             split.y_test, split.X_test, models)
+    >>> print(comparison)
+    """
+    results = []
+    
+    for name, features in feature_sets.items():
+        if verbose:
+            print(f"Evaluating: {name} ({len(features)} features)")
+        
+        try:
+            result = validate_model(
+                y_train, X_train, y_test, X_test,
+                features=features, model_name=name
+            )
+            results.append(result)
+        except Exception as e:
+            if verbose:
+                print(f"  Error with {name}: {e}")
+    
+    # Build comparison DataFrame
+    comparison_data = []
+    for r in results:
+        comparison_data.append({
+            'Model': r.model_name,
+            'N_Features': len(r.selected_features),
+            'Train_R2': r.train_r_squared,
+            'Test_R2': r.test_r_squared,
+            'R2_Diff': r.r_squared_diff,
+            'Train_RMSE': r.train_rmse,
+            'Test_RMSE': r.test_rmse,
+            'RMSE_Diff%': r.rmse_pct_increase,
+            'Overfit': '⚠️' if r.overfit_warning else '✓'
+        })
+    
+    comparison_df = pd.DataFrame(comparison_data)
+    
+    # Find best models
+    best_by_rmse = comparison_df.loc[comparison_df['Test_RMSE'].idxmin(), 'Model']
+    best_by_r2 = comparison_df.loc[comparison_df['Test_R2'].idxmax(), 'Model']
+    
+    return ModelComparisonResults(
+        model_results=results,
+        comparison_df=comparison_df,
+        best_model_by_test_rmse=best_by_rmse,
+        best_model_by_test_r2=best_by_r2
+    )
+
+
+def compare_all_criteria(
+    y: Union[pd.Series, np.ndarray],
+    X: pd.DataFrame,
+    test_size: float = 0.2,
+    random_state: Optional[int] = None,
+    direction: str = 'both',
+    verbose: bool = True
+) -> ModelComparisonResults:
+    """
+    Run stepwise regression with all criteria and compare on train/test split.
+    
+    This is a convenience function that:
+    1. Splits data into train/test
+    2. Runs stepwise with each criterion on training data
+    3. Evaluates all models on test data
+    4. Returns comparison
+    
+    Parameters
+    ----------
+    y : array-like
+        Response variable.
+    X : DataFrame
+        Predictor variables.
+    test_size : float, default=0.2
+        Proportion for test set.
+    random_state : int, optional
+        Random seed for reproducibility.
+    direction : str, default='both'
+        Stepwise direction: 'forward', 'backward', or 'both'.
+    verbose : bool, default=True
+        Print progress.
+        
+    Returns
+    -------
+    ModelComparisonResults
+        Comparison of all stepwise criteria models.
+        
+    Example
+    -------
+    >>> comparison = compare_all_criteria(df['y'], df[predictors], 
+    ...                                   test_size=0.2, random_state=42)
+    >>> print(comparison)
+    >>> plot_model_comparison(comparison)
+    """
+    # Split data
+    split = train_test_split(y, X, test_size=test_size, random_state=random_state)
+    
+    if verbose:
+        print(split)
+        print("Running stepwise with each criterion...")
+    
+    criteria = ['pvalue', 'aic', 'bic', 'adj_rsq', 'rmse', 'cp']
+    feature_sets = {}
+    
+    for crit in criteria:
+        if verbose:
+            print(f"  {crit}...", end=" ")
+        
+        try:
+            step_result = stepwise_regression_enhanced(
+                split.y_train, split.X_train,
+                direction=direction, criterion=crit, verbose=False
+            )
+            if step_result.selected_features:
+                feature_sets[f"Stepwise_{crit.upper()}"] = step_result.selected_features
+                if verbose:
+                    print(f"selected {len(step_result.selected_features)} features")
+            else:
+                if verbose:
+                    print("no features selected")
+        except Exception as e:
+            if verbose:
+                print(f"error: {e}")
+    
+    # Add full model for comparison
+    feature_sets['Full_Model'] = list(X.columns)
+    
+    if verbose:
+        print("\nEvaluating models on test data...")
+    
+    return compare_models(
+        split.y_train, split.X_train,
+        split.y_test, split.X_test,
+        feature_sets, verbose=verbose
+    )
+
+
+def plot_train_test_comparison(
+    results: Union[ModelValidationResults, List[ModelValidationResults]],
+    figsize: Tuple[int, int] = (14, 10)
+) -> None:
+    """
+    Plot train vs test comparison for one or more models.
+    
+    Creates a multi-panel figure with:
+    - Actual vs Predicted scatter plots (train and test)
+    - Residual plots
+    - Metrics comparison bar chart
+    
+    Parameters
+    ----------
+    results : ModelValidationResults or list
+        Single result or list of results from validate_model().
+    figsize : tuple, default=(14, 10)
+        Figure size.
+        
+    Example
+    -------
+    >>> results = validate_model(y_train, X_train, y_test, X_test)
+    >>> plot_train_test_comparison(results)
+    """
+    if not HAS_MATPLOTLIB:
+        raise ImportError("matplotlib required for plotting")
+    
+    if isinstance(results, ModelValidationResults):
+        results = [results]
+    
+    n_models = len(results)
+    
+    if n_models == 1:
+        # Single model - detailed view
+        r = results[0]
+        fig, axes = plt.subplots(2, 2, figsize=figsize)
+        fig.suptitle(f'Model Validation: {r.model_name}', fontsize=14, fontweight='bold')
+        
+        # Train: Actual vs Predicted
+        ax = axes[0, 0]
+        ax.scatter(r.train_actual, r.train_predicted, alpha=0.6, label='Training')
+        min_val = min(r.train_actual.min(), r.train_predicted.min())
+        max_val = max(r.train_actual.max(), r.train_predicted.max())
+        ax.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect fit')
+        ax.set_xlabel('Actual')
+        ax.set_ylabel('Predicted')
+        ax.set_title(f'Training: Actual vs Predicted (R²={r.train_r_squared:.4f})')
+        ax.legend()
+        
+        # Test: Actual vs Predicted
+        ax = axes[0, 1]
+        ax.scatter(r.test_actual, r.test_predicted, alpha=0.6, color='orange', label='Test')
+        min_val = min(r.test_actual.min(), r.test_predicted.min())
+        max_val = max(r.test_actual.max(), r.test_predicted.max())
+        ax.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect fit')
+        ax.set_xlabel('Actual')
+        ax.set_ylabel('Predicted')
+        ax.set_title(f'Test: Actual vs Predicted (R²={r.test_r_squared:.4f})')
+        ax.legend()
+        
+        # Train Residuals
+        ax = axes[1, 0]
+        train_resid = r.train_actual - r.train_predicted
+        ax.scatter(r.train_predicted, train_resid, alpha=0.6)
+        ax.axhline(y=0, color='r', linestyle='--')
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('Residual')
+        ax.set_title(f'Training Residuals (RMSE={r.train_rmse:.4f})')
+        
+        # Test Residuals
+        ax = axes[1, 1]
+        test_resid = r.test_actual - r.test_predicted
+        ax.scatter(r.test_predicted, test_resid, alpha=0.6, color='orange')
+        ax.axhline(y=0, color='r', linestyle='--')
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('Residual')
+        ax.set_title(f'Test Residuals (RMSE={r.test_rmse:.4f})')
+        
+    else:
+        # Multiple models - comparison view
+        fig, axes = plt.subplots(2, 2, figsize=figsize)
+        fig.suptitle('Model Comparison: Train vs Test Performance', fontsize=14, fontweight='bold')
+        
+        model_names = [r.model_name for r in results]
+        x = np.arange(len(model_names))
+        width = 0.35
+        
+        # R-squared comparison
+        ax = axes[0, 0]
+        train_r2 = [r.train_r_squared for r in results]
+        test_r2 = [r.test_r_squared for r in results]
+        bars1 = ax.bar(x - width/2, train_r2, width, label='Train', color='steelblue')
+        bars2 = ax.bar(x + width/2, test_r2, width, label='Test', color='orange')
+        ax.set_ylabel('R-Squared')
+        ax.set_title('R-Squared: Train vs Test')
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_names, rotation=45, ha='right')
+        ax.legend()
+        ax.set_ylim(0, max(max(train_r2), max(test_r2)) * 1.1)
+        
+        # RMSE comparison
+        ax = axes[0, 1]
+        train_rmse = [r.train_rmse for r in results]
+        test_rmse = [r.test_rmse for r in results]
+        bars1 = ax.bar(x - width/2, train_rmse, width, label='Train', color='steelblue')
+        bars2 = ax.bar(x + width/2, test_rmse, width, label='Test', color='orange')
+        ax.set_ylabel('RMSE')
+        ax.set_title('RMSE: Train vs Test')
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_names, rotation=45, ha='right')
+        ax.legend()
+        
+        # RMSE % increase (overfitting indicator)
+        ax = axes[1, 0]
+        rmse_pct = [r.rmse_pct_increase for r in results]
+        colors = ['red' if p > 20 else 'green' for p in rmse_pct]
+        ax.bar(x, rmse_pct, color=colors)
+        ax.axhline(y=20, color='red', linestyle='--', label='Overfit threshold (20%)')
+        ax.set_ylabel('RMSE Increase (%)')
+        ax.set_title('Test RMSE Increase (Overfit Indicator)')
+        ax.set_xticks(x)
+        ax.set_xticklabels(model_names, rotation=45, ha='right')
+        ax.legend()
+        
+        # Number of features vs Test R²
+        ax = axes[1, 1]
+        n_features = [len(r.selected_features) for r in results]
+        ax.scatter(n_features, test_r2, s=100, c='orange', edgecolors='black')
+        for i, name in enumerate(model_names):
+            ax.annotate(name, (n_features[i], test_r2[i]), 
+                       textcoords="offset points", xytext=(5, 5), fontsize=8)
+        ax.set_xlabel('Number of Features')
+        ax.set_ylabel('Test R-Squared')
+        ax.set_title('Model Complexity vs Test Performance')
+    
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_model_comparison(comparison: ModelComparisonResults, figsize: Tuple[int, int] = (14, 10)) -> None:
+    """
+    Plot comparison of multiple models from compare_models() or compare_all_criteria().
+    
+    Parameters
+    ----------
+    comparison : ModelComparisonResults
+        Results from compare_models() or compare_all_criteria().
+    figsize : tuple, default=(14, 10)
+        Figure size.
+        
+    Example
+    -------
+    >>> comparison = compare_all_criteria(df['y'], df[predictors])
+    >>> plot_model_comparison(comparison)
+    """
+    plot_train_test_comparison(comparison.model_results, figsize=figsize)
+
+
+# =============================================================================
 # MODULE EXPORTS
 # =============================================================================
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __all__ = [
     # Data classes
     'DescriptiveStats', 'NormalityTest', 'RegressionResults', 'ResidualDiagnostics',
     'CorrelationResults', 'ANOVAResults', 'TTestResults', 
     'HatMatrixResults', 'SubsetRegressionResults', 'StepwiseResults',
     'CovariateCombinations',
+    'TrainTestSplit', 'ModelValidationResults', 'ModelComparisonResults',
     
     # Data import
     'read_csv', 'read_excel',
@@ -2994,6 +3702,10 @@ __all__ = [
     
     # Covariate combinations / feature engineering
     'covariate_combinations', 'full_factorial_design', 'polynomial_features',
+    
+    # Train/test validation
+    'train_test_split', 'validate_model', 'compare_models', 
+    'compare_all_criteria', 'plot_train_test_comparison', 'plot_model_comparison',
     
     # Convenience functions
     'fit_y_by_x', 'fit_model', 'distribution_analysis', 'multivariate_analysis',
