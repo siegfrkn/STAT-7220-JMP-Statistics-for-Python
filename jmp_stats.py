@@ -9,6 +9,11 @@ matplotlib/seaborn for visualization.
 Installation Requirements:
     pip install numpy pandas scipy statsmodels matplotlib seaborn
 
+NEW IN v1.2:
+    - covariate_combinations(): Generate all interaction and polynomial terms
+    - full_factorial_design(): Create full factorial design matrices  
+    - polynomial_features(): sklearn-style polynomial feature generation
+
 NEW IN v1.1:
     - read_csv() / read_excel(): Import data with automatic type detection
     - hat_matrix(): Full influence diagnostics (leverage, Cook's D, DFFITS, DFBETAS)
@@ -51,6 +56,28 @@ Usage Examples:
     # All subsets regression
     subsets = subset_regression(df['y'], df[predictors], max_vars=10)
     print(subsets.best_overall)
+
+    # Generate covariate combinations for regression modeling
+    from jmp_stats import covariate_combinations
+    
+    # Create all pairwise interactions
+    result = covariate_combinations(df, ['x1', 'x2', 'x3'])
+    print(result)  # Shows x1, x2, x3, x1:x2, x1:x3, x2:x3
+    
+    # Add polynomial terms (squared)
+    result = covariate_combinations(df, ['x1', 'x2'], 
+                                    polynomial_degree=2)
+    # Creates: x1, x2, x1:x2, x1^2, x2^2
+    
+    # Three-way interactions with cubic polynomials
+    result = covariate_combinations(df, ['a', 'b', 'c'],
+                                    max_interaction_order=3,
+                                    polynomial_degree=3)
+    
+    # Use expanded features with stepwise regression
+    expanded = covariate_combinations(df, predictors, max_interaction_order=2)
+    step = stepwise_regression_enhanced(df['y'], expanded.expanded_df, 
+                                        criterion='bic')
 
 Stopping Criteria for Stepwise:
     - 'pvalue': P-value threshold (add if p < alpha_enter, remove if p > alpha_remove)
@@ -2607,15 +2634,347 @@ def compare_stepwise_criteria(
 
 
 # =============================================================================
+# COVARIATE COMBINATIONS FOR REGRESSION MODELING
+# =============================================================================
+
+@dataclass
+class CovariateCombinations:
+    """Container for covariate combination results."""
+    original_columns: List[str]
+    interaction_columns: List[str]
+    polynomial_columns: List[str]
+    all_new_columns: List[str]
+    expanded_df: pd.DataFrame
+    n_original: int
+    n_interactions: int
+    n_polynomial: int
+    n_total: int
+    
+    def __str__(self):
+        return f"""
+Covariate Combinations
+======================
+Original Variables:      {self.n_original}
+Interaction Terms:       {self.n_interactions}
+Polynomial Terms:        {self.n_polynomial}
+Total New Columns:       {len(self.all_new_columns)}
+Total Columns:           {self.n_total}
+
+Original: {', '.join(self.original_columns[:5])}{'...' if len(self.original_columns) > 5 else ''}
+Interactions: {', '.join(self.interaction_columns[:5])}{'...' if len(self.interaction_columns) > 5 else ''}
+Polynomial: {', '.join(self.polynomial_columns[:5])}{'...' if len(self.polynomial_columns) > 5 else ''}
+"""
+
+    def get_terms_up_to_order(self, order: int) -> List[str]:
+        """Get all term names up to specified interaction order."""
+        terms = list(self.original_columns)
+        for col in self.interaction_columns:
+            n_vars = col.count(':') + 1
+            if n_vars <= order:
+                terms.append(col)
+        return terms
+
+
+def covariate_combinations(
+    df: pd.DataFrame,
+    columns: Optional[List[str]] = None,
+    max_interaction_order: int = 2,
+    polynomial_degree: int = 1,
+    include_interactions: bool = True,
+    include_polynomials: bool = True,
+    interaction_sep: str = ':',
+    polynomial_sep: str = '^',
+    exclude_self_interactions: bool = True,
+    keep_original: bool = True,
+    numeric_only: bool = True
+) -> CovariateCombinations:
+    """
+    Generate all covariate combinations for regression modeling.
+    
+    Creates interaction terms (x1*x2, x1*x2*x3, etc.) and polynomial terms
+    (x^2, x^3, etc.) from the specified columns, similar to JMP's 
+    "Construct Model Effects" feature.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame containing the predictor variables.
+    columns : list of str, optional
+        Columns to use for combinations. If None, uses all numeric columns.
+    max_interaction_order : int, default=2
+        Maximum order of interactions to generate.
+        - 2: pairwise interactions (x1*x2)
+        - 3: three-way interactions (x1*x2*x3)
+        - etc.
+    polynomial_degree : int, default=1
+        Maximum polynomial degree. 
+        - 1: no polynomial terms (just original)
+        - 2: squared terms (x^2)
+        - 3: squared and cubic (x^2, x^3)
+    include_interactions : bool, default=True
+        Whether to generate interaction terms.
+    include_polynomials : bool, default=True
+        Whether to generate polynomial terms (degree > 1).
+    interaction_sep : str, default=':'
+        Separator for interaction term names (e.g., 'x1:x2').
+    polynomial_sep : str, default='^'
+        Separator for polynomial term names (e.g., 'x^2').
+    exclude_self_interactions : bool, default=True
+        If True, excludes interactions of a variable with itself (x1:x1).
+        Polynomial terms handle powers separately.
+    keep_original : bool, default=True
+        Whether to include original columns in the output DataFrame.
+    numeric_only : bool, default=True
+        If True and columns is None, only uses numeric columns.
+        
+    Returns
+    -------
+    CovariateCombinations
+        Dataclass containing:
+        - original_columns: List of original column names
+        - interaction_columns: List of generated interaction column names
+        - polynomial_columns: List of generated polynomial column names
+        - all_new_columns: List of all newly created column names
+        - expanded_df: DataFrame with all original and new columns
+        - n_original, n_interactions, n_polynomial, n_total: Counts
+        
+    Examples
+    --------
+    >>> # Basic usage - pairwise interactions
+    >>> result = covariate_combinations(df, ['x1', 'x2', 'x3'])
+    >>> print(result.expanded_df.columns.tolist())
+    ['x1', 'x2', 'x3', 'x1:x2', 'x1:x3', 'x2:x3']
+    
+    >>> # With polynomial terms
+    >>> result = covariate_combinations(df, ['x1', 'x2'], polynomial_degree=2)
+    >>> print(result.expanded_df.columns.tolist())
+    ['x1', 'x2', 'x1:x2', 'x1^2', 'x2^2']
+    
+    >>> # Three-way interactions with cubic polynomials
+    >>> result = covariate_combinations(df, ['a', 'b', 'c'], 
+    ...                                  max_interaction_order=3, 
+    ...                                  polynomial_degree=3)
+    
+    >>> # Use with linear regression
+    >>> result = covariate_combinations(df, ['x1', 'x2', 'x3'])
+    >>> model = linear_regression(df['y'], result.expanded_df)
+    
+    >>> # Use with stepwise regression
+    >>> result = covariate_combinations(df, predictors, max_interaction_order=2)
+    >>> step = stepwise_regression_enhanced(df['y'], result.expanded_df)
+    
+    Notes
+    -----
+    - For k variables with max_interaction_order=2: generates k*(k-1)/2 interactions
+    - For k variables with polynomial_degree=d: generates k*(d-1) polynomial terms
+    - Warning: High orders with many variables can create very large feature spaces
+    - Consider using subset_regression or stepwise_regression to select terms
+    
+    See Also
+    --------
+    linear_regression : Fit linear regression model
+    stepwise_regression_enhanced : Variable selection with various criteria
+    subset_regression : All possible subsets regression
+    """
+    from itertools import combinations
+    
+    # Determine columns to use
+    if columns is None:
+        if numeric_only:
+            columns = df.select_dtypes(include=[np.number]).columns.tolist()
+        else:
+            columns = df.columns.tolist()
+    
+    # Validate columns exist
+    missing = [c for c in columns if c not in df.columns]
+    if missing:
+        raise ValueError(f"Columns not found in DataFrame: {missing}")
+    
+    # Validate parameters
+    if max_interaction_order < 1:
+        raise ValueError("max_interaction_order must be >= 1")
+    if polynomial_degree < 1:
+        raise ValueError("polynomial_degree must be >= 1")
+    
+    # Start with original columns
+    expanded_data = {}
+    if keep_original:
+        for col in columns:
+            expanded_data[col] = df[col].values.copy()
+    
+    interaction_columns = []
+    polynomial_columns = []
+    
+    # Generate interaction terms
+    if include_interactions and max_interaction_order >= 2:
+        for order in range(2, max_interaction_order + 1):
+            for combo in combinations(columns, order):
+                # Skip if exclude_self_interactions and any column repeats
+                # (though combinations already handles this)
+                if exclude_self_interactions and len(set(combo)) < len(combo):
+                    continue
+                    
+                # Create interaction term name
+                term_name = interaction_sep.join(combo)
+                
+                # Calculate interaction value (product of all columns)
+                interaction_value = np.ones(len(df))
+                for col in combo:
+                    interaction_value = interaction_value * df[col].values
+                
+                expanded_data[term_name] = interaction_value
+                interaction_columns.append(term_name)
+    
+    # Generate polynomial terms
+    if include_polynomials and polynomial_degree >= 2:
+        for col in columns:
+            for degree in range(2, polynomial_degree + 1):
+                term_name = f"{col}{polynomial_sep}{degree}"
+                expanded_data[term_name] = df[col].values ** degree
+                polynomial_columns.append(term_name)
+    
+    # Create expanded DataFrame
+    expanded_df = pd.DataFrame(expanded_data, index=df.index)
+    
+    # Compile all new columns
+    all_new_columns = interaction_columns + polynomial_columns
+    
+    # Warn if feature space is very large
+    if len(all_new_columns) > 100:
+        warnings.warn(
+            f"Generated {len(all_new_columns)} new columns. Consider using "
+            "stepwise_regression or subset_regression for variable selection.",
+            UserWarning
+        )
+    
+    return CovariateCombinations(
+        original_columns=columns,
+        interaction_columns=interaction_columns,
+        polynomial_columns=polynomial_columns,
+        all_new_columns=all_new_columns,
+        expanded_df=expanded_df,
+        n_original=len(columns),
+        n_interactions=len(interaction_columns),
+        n_polynomial=len(polynomial_columns),
+        n_total=len(expanded_df.columns)
+    )
+
+
+def full_factorial_design(
+    df: pd.DataFrame,
+    columns: Optional[List[str]] = None,
+    include_intercept: bool = False
+) -> pd.DataFrame:
+    """
+    Generate a full factorial design matrix with all interaction terms.
+    
+    This is a convenience wrapper around covariate_combinations that generates
+    all possible interactions up to the maximum order (k-way for k variables).
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame.
+    columns : list of str, optional
+        Columns to include. If None, uses all numeric columns.
+    include_intercept : bool, default=False
+        Whether to include an intercept column of ones.
+        
+    Returns
+    -------
+    pd.DataFrame
+        Design matrix with all main effects and interactions.
+        
+    Example
+    -------
+    >>> design = full_factorial_design(df, ['A', 'B', 'C'])
+    >>> # Returns: A, B, C, A:B, A:C, B:C, A:B:C
+    """
+    if columns is None:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    result = covariate_combinations(
+        df,
+        columns=columns,
+        max_interaction_order=len(columns),
+        polynomial_degree=1,
+        include_polynomials=False
+    )
+    
+    design_df = result.expanded_df.copy()
+    
+    if include_intercept:
+        design_df.insert(0, 'Intercept', 1)
+    
+    return design_df
+
+
+def polynomial_features(
+    df: pd.DataFrame,
+    columns: Optional[List[str]] = None,
+    degree: int = 2,
+    include_interactions: bool = True,
+    include_bias: bool = False
+) -> pd.DataFrame:
+    """
+    Generate polynomial features similar to sklearn's PolynomialFeatures.
+    
+    Creates polynomial terms and optionally interaction terms for regression.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame.
+    columns : list of str, optional
+        Columns to transform. If None, uses all numeric columns.
+    degree : int, default=2
+        Maximum polynomial degree.
+    include_interactions : bool, default=True
+        Whether to include interaction terms.
+    include_bias : bool, default=False
+        Whether to include a bias/intercept column of ones.
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with polynomial and interaction features.
+        
+    Example
+    -------
+    >>> poly_df = polynomial_features(df, ['x1', 'x2'], degree=2)
+    >>> # Returns: x1, x2, x1^2, x2^2, x1:x2
+    """
+    if columns is None:
+        columns = df.select_dtypes(include=[np.number]).columns.tolist()
+    
+    result = covariate_combinations(
+        df,
+        columns=columns,
+        max_interaction_order=degree if include_interactions else 1,
+        polynomial_degree=degree,
+        include_interactions=include_interactions,
+        include_polynomials=True
+    )
+    
+    poly_df = result.expanded_df.copy()
+    
+    if include_bias:
+        poly_df.insert(0, 'bias', 1)
+    
+    return poly_df
+
+
+# =============================================================================
 # MODULE EXPORTS
 # =============================================================================
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __all__ = [
     # Data classes
     'DescriptiveStats', 'NormalityTest', 'RegressionResults', 'ResidualDiagnostics',
     'CorrelationResults', 'ANOVAResults', 'TTestResults', 
     'HatMatrixResults', 'SubsetRegressionResults', 'StepwiseResults',
+    'CovariateCombinations',
     
     # Data import
     'read_csv', 'read_excel',
@@ -2632,6 +2991,9 @@ __all__ = [
     # Model selection
     'subset_regression', 'stepwise_regression', 
     'stepwise_regression_enhanced', 'compare_stepwise_criteria',
+    
+    # Covariate combinations / feature engineering
+    'covariate_combinations', 'full_factorial_design', 'polynomial_features',
     
     # Convenience functions
     'fit_y_by_x', 'fit_model', 'distribution_analysis', 'multivariate_analysis',
