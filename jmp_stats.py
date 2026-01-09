@@ -9,6 +9,27 @@ matplotlib/seaborn for visualization.
 Installation Requirements:
     pip install numpy pandas scipy statsmodels matplotlib seaborn
 
+NEW IN v2.0:
+    - INTERACTIVE VISUALIZATIONS:
+        - plot_leverage_interactive(): JMP-style interactive leverage plots
+        - plot_influence_dashboard(): Comprehensive influence diagnostic dashboard
+    - PREDICTION PROFILER:
+        - prediction_profiler(): JMP-style interactive prediction profiler
+        - PredictionProfiler class for saved profiler objects
+    - DESIGN OF EXPERIMENTS (DoE):
+        - fractional_factorial_design(): Create fractional factorial designs
+        - response_surface_design(): Central Composite & Box-Behnken designs
+        - optimal_design(): D-optimal and I-optimal designs
+        - analyze_factorial(): Analyze factorial experiments with effects
+        - effect_screening(): Screening designs with Pareto of effects
+    - TIME SERIES ANALYSIS:
+        - arima(): ARIMA modeling with automatic order selection
+        - exponential_smoothing(): Simple, double, and Holt-Winters smoothing
+        - autocorrelation_analysis(): ACF/PACF with significance bounds
+        - seasonal_decomposition(): Decompose into trend, seasonal, residual
+        - time_series_forecast(): Unified forecasting interface
+        - plot_time_series_diagnostics(): Comprehensive TS diagnostic plots
+
 NEW IN v1.3:
     - train_test_split(): Split data into training and test sets
     - validate_model(): Train on training data, evaluate on both train/test
@@ -3036,21 +3057,32 @@ Features:            {len(self.X_train.columns)}
 
 @dataclass
 class ModelValidationResults:
-    """Container for model validation results comparing train vs test performance."""
+    """
+    Container for model validation results comparing train vs test performance.
+    
+    Matches JMP's validation metrics terminology:
+    - RSquare Training: R² on training data
+    - RSquare Validation: R² on validation/test data (can be negative if model overfits)
+    - RASE: Root Average Squared Error (same as RMSE)
+    
+    Note: Per JMP documentation, "It is possible for RSquare Validation to be negative."
+    This occurs when the model predictions are worse than simply predicting the mean,
+    indicating severe overfitting.
+    """
     model_name: str
     selected_features: List[str]
     
-    # Training metrics
+    # Training metrics (JMP: "Training" column)
     train_r_squared: float
     train_adj_r_squared: float
-    train_rmse: float
+    train_rmse: float  # JMP calls this RASE (Root Average Squared Error)
     train_mae: float
     train_mape: float
     
-    # Test metrics
-    test_r_squared: float
+    # Validation/Test metrics (JMP: "Validation" column)
+    test_r_squared: float  # JMP: "RSquare Validation" - CAN BE NEGATIVE
     test_adj_r_squared: float
-    test_rmse: float
+    test_rmse: float  # JMP: "RASE Validation"
     test_mae: float
     test_mape: float
     
@@ -3069,52 +3101,85 @@ class ModelValidationResults:
     # Full model object
     train_model: Optional[Any] = None
     
+    # JMP-style aliases
+    @property
+    def rsquare_training(self) -> float:
+        """JMP terminology: RSquare Training"""
+        return self.train_r_squared
+    
+    @property
+    def rsquare_validation(self) -> float:
+        """JMP terminology: RSquare Validation (can be negative if overfit)"""
+        return self.test_r_squared
+    
+    @property
+    def rase_training(self) -> float:
+        """JMP terminology: RASE Training (Root Average Squared Error)"""
+        return self.train_rmse
+    
+    @property
+    def rase_validation(self) -> float:
+        """JMP terminology: RASE Validation"""
+        return self.test_rmse
+    
     def __str__(self):
-        overfit_msg = "⚠️  POSSIBLE OVERFITTING" if self.overfit_warning else "✓ Model generalizes well"
+        # Determine overfit severity
+        if self.test_r_squared < 0:
+            overfit_msg = "⚠️  SEVERE OVERFITTING (Validation R² < 0: model worse than mean)"
+        elif self.overfit_warning:
+            overfit_msg = "⚠️  POSSIBLE OVERFITTING"
+        else:
+            overfit_msg = "✓ Model generalizes well"
+        
         return f"""
 Model Validation Results: {self.model_name}
 {'=' * (27 + len(self.model_name))}
 Features: {len(self.selected_features)}
 {', '.join(self.selected_features[:5])}{'...' if len(self.selected_features) > 5 else ''}
 
-                    Training        Test          Difference
-                    --------        ----          ----------
-R-Squared           {self.train_r_squared:8.4f}        {self.test_r_squared:8.4f}        {self.r_squared_diff:+8.4f}
-Adj R-Squared       {self.train_adj_r_squared:8.4f}        {self.test_adj_r_squared:8.4f}
-RMSE                {self.train_rmse:8.4f}        {self.test_rmse:8.4f}        {self.rmse_diff:+8.4f} ({self.rmse_pct_increase:+.1f}%)
-MAE                 {self.train_mae:8.4f}        {self.test_mae:8.4f}
-MAPE                {self.train_mape:8.2f}%       {self.test_mape:8.2f}%
+                    Training        Validation    Difference
+                    --------        ----------    ----------
+RSquare             {self.train_r_squared:8.4f}        {self.test_r_squared:8.4f}        {self.r_squared_diff:+8.4f}
+RSquare Adj         {self.train_adj_r_squared:8.4f}        {self.test_adj_r_squared:8.4f}
+RASE                {self.train_rmse:8.6f}      {self.test_rmse:8.6f}      {self.rmse_diff:+8.6f}
+MAE                 {self.train_mae:8.6f}      {self.test_mae:8.6f}
 
 {overfit_msg}
+
+Note: Negative Validation RSquare indicates the model performs worse than
+predicting the mean - a sign of overfitting. Consider reducing model complexity.
 """
 
     def to_dataframe(self) -> pd.DataFrame:
-        """Return metrics as a DataFrame."""
+        """Return metrics as a DataFrame (JMP-style column names)."""
         return pd.DataFrame({
-            'Metric': ['R-Squared', 'Adj R-Squared', 'RMSE', 'MAE', 'MAPE (%)'],
+            'Metric': ['RSquare', 'RSquare Adj', 'RASE', 'MAE'],
             'Training': [self.train_r_squared, self.train_adj_r_squared, 
-                        self.train_rmse, self.train_mae, self.train_mape],
-            'Test': [self.test_r_squared, self.test_adj_r_squared,
-                    self.test_rmse, self.test_mae, self.test_mape],
-            'Difference': [self.r_squared_diff, np.nan, self.rmse_diff, np.nan, np.nan]
+                        self.train_rmse, self.train_mae],
+            'Validation': [self.test_r_squared, self.test_adj_r_squared,
+                          self.test_rmse, self.test_mae],
+            'Difference': [self.r_squared_diff, np.nan, self.rmse_diff, np.nan]
         })
 
 
 @dataclass
 class ModelComparisonResults:
-    """Container for comparing multiple models on train/test data."""
+    """Container for comparing multiple models on train/validation data (JMP-style)."""
     model_results: List[ModelValidationResults]
     comparison_df: pd.DataFrame
-    best_model_by_test_rmse: str
-    best_model_by_test_r2: str
+    best_model_by_test_rmse: str  # JMP: best by RASE Validation
+    best_model_by_test_r2: str    # JMP: best by RSquare Validation
     
     def __str__(self):
         return f"""
-Model Comparison Summary
-========================
+Model Comparison Summary (JMP-Style)
+====================================
 Models Compared: {len(self.model_results)}
-Best by Test RMSE: {self.best_model_by_test_rmse}
-Best by Test R²:   {self.best_model_by_test_r2}
+Best by RASE Validation: {self.best_model_by_test_rmse}
+Best by RSquare Validation: {self.best_model_by_test_r2}
+
+Note: Negative RSquare Validation indicates overfitting (model worse than mean).
+Rule of thumb: Need 10-20 observations per feature to avoid overfitting.
 
 {self.comparison_df.to_string()}
 """
@@ -3208,6 +3273,105 @@ def train_test_split(
         test_size=len(test_indices),
         test_ratio=test_size
     )
+
+
+def make_validation_column(
+    df: pd.DataFrame,
+    validation_portion: float = 0.2,
+    test_portion: float = 0.0,
+    random_state: Optional[int] = None,
+    method: str = 'random'
+) -> pd.DataFrame:
+    """
+    Create a validation column for the DataFrame (JMP-style).
+    
+    This mimics JMP's "Make Validation Column" functionality, which creates
+    a column that can be used to split data into Training, Validation, and 
+    optionally Test sets.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame.
+    validation_portion : float, default=0.2
+        Proportion of data for validation set (0.0 to 1.0).
+    test_portion : float, default=0.0
+        Proportion of data for test set (0.0 to 1.0).
+        If 0, only Training and Validation sets are created.
+    random_state : int, optional
+        Random seed for reproducibility.
+    method : str, default='random'
+        Method for creating validation column:
+        - 'random': Random assignment
+        - 'sequential': First rows = Training, last rows = Validation/Test
+        
+    Returns
+    -------
+    pd.DataFrame
+        Original DataFrame with added 'Validation' column containing:
+        - 0 = Training
+        - 1 = Validation  
+        - 2 = Test (if test_portion > 0)
+        
+    Example
+    -------
+    >>> # JMP-style: 70% Train, 20% Validation, 10% Test
+    >>> df = make_validation_column(df, validation_portion=0.2, test_portion=0.1)
+    >>> 
+    >>> # Use with stepwise
+    >>> train_df = df[df['Validation'] == 0]
+    >>> valid_df = df[df['Validation'] == 1]
+    
+    Notes
+    -----
+    JMP's validation column uses:
+    - Smallest value = Training set
+    - Middle value = Validation set  
+    - Largest value = Test set
+    
+    This function follows that convention with 0, 1, 2.
+    """
+    if random_state is not None:
+        np.random.seed(random_state)
+    
+    n = len(df)
+    train_portion = 1.0 - validation_portion - test_portion
+    
+    if train_portion <= 0:
+        raise ValueError("Training portion must be > 0. Reduce validation_portion or test_portion.")
+    
+    result_df = df.copy()
+    
+    if method == 'random':
+        # Random assignment
+        rand_vals = np.random.random(n)
+        validation_col = np.zeros(n, dtype=int)
+        validation_col[rand_vals >= train_portion] = 1
+        if test_portion > 0:
+            validation_col[rand_vals >= (train_portion + validation_portion)] = 2
+    else:
+        # Sequential assignment
+        validation_col = np.zeros(n, dtype=int)
+        n_train = int(n * train_portion)
+        n_valid = int(n * validation_portion)
+        validation_col[n_train:n_train + n_valid] = 1
+        if test_portion > 0:
+            validation_col[n_train + n_valid:] = 2
+    
+    result_df['Validation'] = validation_col
+    
+    # Print summary like JMP
+    counts = pd.Series(validation_col).value_counts().sort_index()
+    print(f"""
+Validation Column Created
+=========================
+Training (0):    {counts.get(0, 0):5d} rows ({counts.get(0, 0)/n*100:.1f}%)
+Validation (1):  {counts.get(1, 0):5d} rows ({counts.get(1, 0)/n*100:.1f}%)""")
+    if test_portion > 0:
+        print(f"Test (2):        {counts.get(2, 0):5d} rows ({counts.get(2, 0)/n*100:.1f}%)")
+    print(f"Total:           {n:5d} rows")
+    
+    return result_df
 
 
 def validate_model(
@@ -3403,20 +3567,19 @@ def compare_models(
         comparison_data.append({
             'Model': r.model_name,
             'N_Features': len(r.selected_features),
-            'Train_R2': r.train_r_squared,
-            'Test_R2': r.test_r_squared,
+            'RSquare_Train': r.train_r_squared,
+            'RSquare_Valid': r.test_r_squared,
             'R2_Diff': r.r_squared_diff,
-            'Train_RMSE': r.train_rmse,
-            'Test_RMSE': r.test_rmse,
-            'RMSE_Diff%': r.rmse_pct_increase,
-            'Overfit': '⚠️' if r.overfit_warning else '✓'
+            'RASE_Train': r.train_rmse,
+            'RASE_Valid': r.test_rmse,
+            'Overfit': '⚠️' if r.overfit_warning or r.test_r_squared < 0 else '✓'
         })
     
     comparison_df = pd.DataFrame(comparison_data)
     
     # Find best models
-    best_by_rmse = comparison_df.loc[comparison_df['Test_RMSE'].idxmin(), 'Model']
-    best_by_r2 = comparison_df.loc[comparison_df['Test_R2'].idxmax(), 'Model']
+    best_by_rmse = comparison_df.loc[comparison_df['RASE_Valid'].idxmin(), 'Model']
+    best_by_r2 = comparison_df.loc[comparison_df['RSquare_Valid'].idxmax(), 'Model']
     
     return ModelComparisonResults(
         model_results=results,
@@ -3672,10 +3835,2085 @@ def plot_model_comparison(comparison: ModelComparisonResults, figsize: Tuple[int
 
 
 # =============================================================================
+# NEW v2.0: INTERACTIVE LEVERAGE PLOTS AND INFLUENCE DIAGNOSTICS
+# =============================================================================
+
+def plot_leverage_interactive(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray],
+    highlight_influential: bool = True,
+    show_labels: bool = True,
+    figsize: Tuple[int, int] = (14, 10)
+) -> Optional[Any]:
+    """
+    Create JMP-style interactive leverage plots for each predictor.
+    
+    Shows the relationship between each predictor and the response,
+    controlling for all other predictors (partial regression plots).
+    
+    Parameters
+    ----------
+    y : array-like
+        Response variable
+    X : DataFrame
+        Predictor variables
+    highlight_influential : bool, default=True
+        Highlight high-leverage and high-influence points
+    show_labels : bool, default=True
+        Show observation labels for influential points
+    figsize : tuple, default=(14, 10)
+        Figure size
+        
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The leverage plots figure
+        
+    Example
+    -------
+    >>> plot_leverage_interactive(df['y'], df[['x1', 'x2', 'x3']])
+    """
+    if not HAS_MATPLOTLIB or not HAS_STATSMODELS:
+        print("matplotlib and statsmodels required for leverage plots")
+        return None
+    
+    y = np.asarray(y).flatten()
+    
+    if isinstance(X, pd.DataFrame):
+        X_names = list(X.columns)
+        X_arr = X.values
+    else:
+        X_arr = np.asarray(X)
+        X_names = [f'X{i+1}' for i in range(X_arr.shape[1])]
+    
+    # Remove missing values
+    mask = ~(np.isnan(y) | np.any(np.isnan(X_arr), axis=1))
+    y = y[mask]
+    X_arr = X_arr[mask]
+    n = len(y)
+    p = X_arr.shape[1]
+    
+    # Fit full model for influence diagnostics
+    X_const = sm.add_constant(X_arr)
+    full_model = sm.OLS(y, X_const).fit()
+    influence = full_model.get_influence()
+    leverage = influence.hat_matrix_diag
+    cooks_d = influence.cooks_distance[0]
+    
+    # Thresholds
+    leverage_threshold = 2 * (p + 1) / n
+    cooks_threshold = 4 / n
+    
+    # Determine grid size
+    n_cols = min(3, p)
+    n_rows = int(np.ceil(p / n_cols))
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+    if p == 1:
+        axes = np.array([[axes]])
+    elif n_rows == 1:
+        axes = axes.reshape(1, -1)
+    elif n_cols == 1:
+        axes = axes.reshape(-1, 1)
+    
+    for idx, var_name in enumerate(X_names):
+        row, col = idx // n_cols, idx % n_cols
+        ax = axes[row, col]
+        
+        # Create partial regression plot (added variable plot)
+        other_vars = [i for i in range(p) if i != idx]
+        if len(other_vars) > 0:
+            X_other = sm.add_constant(X_arr[:, other_vars])
+            model_y = sm.OLS(y, X_other).fit()
+            resid_y = model_y.resid
+            
+            model_x = sm.OLS(X_arr[:, idx], X_other).fit()
+            resid_x = model_x.resid
+        else:
+            resid_y = y - np.mean(y)
+            resid_x = X_arr[:, idx] - np.mean(X_arr[:, idx])
+        
+        # Color points by influence
+        colors = np.array(['steelblue'] * n)
+        sizes = np.array([50.0] * n)
+        
+        if highlight_influential:
+            high_leverage = leverage > leverage_threshold
+            high_cooks = cooks_d > cooks_threshold
+            
+            colors[high_leverage] = 'orange'
+            colors[high_cooks] = 'red'
+            sizes[high_leverage | high_cooks] = 100
+        
+        ax.scatter(resid_x, resid_y, c=colors, s=sizes, alpha=0.6, edgecolors='black', linewidth=0.5)
+        
+        # Add regression line
+        slope, intercept = np.polyfit(resid_x, resid_y, 1)
+        x_line = np.linspace(resid_x.min(), resid_x.max(), 100)
+        ax.plot(x_line, slope * x_line + intercept, 'r-', lw=2)
+        
+        # Label influential points
+        if show_labels and highlight_influential:
+            for i in np.where(high_leverage | high_cooks)[0]:
+                ax.annotate(str(i), (resid_x[i], resid_y[i]), 
+                           fontsize=8, ha='left', va='bottom')
+        
+        ax.set_xlabel(f'{var_name} | Others')
+        ax.set_ylabel('Y | Others')
+        ax.set_title(f'Leverage Plot: {var_name}')
+        ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+        ax.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    
+    # Hide unused subplots
+    for idx in range(p, n_rows * n_cols):
+        row, col = idx // n_cols, idx % n_cols
+        axes[row, col].set_visible(False)
+    
+    # Add legend
+    if highlight_influential:
+        legend_elements = [
+            plt.scatter([], [], c='steelblue', s=50, label='Normal'),
+            plt.scatter([], [], c='orange', s=100, label='High Leverage'),
+            plt.scatter([], [], c='red', s=100, label='High Influence (Cook\'s D)')
+        ]
+        fig.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(0.99, 0.99))
+    
+    plt.suptitle('Leverage Plots (Partial Regression)', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    return fig
+
+
+def plot_influence_dashboard(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray],
+    figsize: Tuple[int, int] = (16, 12)
+) -> Optional[Any]:
+    """
+    Create comprehensive influence diagnostics dashboard (JMP-style).
+    
+    Includes:
+    - Studentized residuals vs leverage (with Cook's D contours)
+    - Cook's D bar chart
+    - DFFITS plot
+    - Residuals vs fitted with influence sizing
+    
+    Parameters
+    ----------
+    y : array-like
+        Response variable
+    X : DataFrame or array
+        Predictor variables
+    figsize : tuple, default=(16, 12)
+        Figure size
+        
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The influence dashboard figure
+        
+    Example
+    -------
+    >>> plot_influence_dashboard(df['y'], df[['x1', 'x2', 'x3']])
+    """
+    if not HAS_MATPLOTLIB or not HAS_STATSMODELS:
+        print("matplotlib and statsmodels required")
+        return None
+    
+    y = np.asarray(y).flatten()
+    
+    if isinstance(X, pd.DataFrame):
+        X_arr = X.values
+    else:
+        X_arr = np.asarray(X)
+    
+    mask = ~(np.isnan(y) | np.any(np.isnan(X_arr), axis=1))
+    y = y[mask]
+    X_arr = X_arr[mask]
+    n = len(y)
+    p = X_arr.shape[1]
+    
+    X_const = sm.add_constant(X_arr)
+    model = sm.OLS(y, X_const).fit()
+    influence = model.get_influence()
+    
+    leverage = influence.hat_matrix_diag
+    stud_resid = influence.resid_studentized_external
+    cooks_d = influence.cooks_distance[0]
+    dffits = influence.dffits[0]
+    predicted = model.predict(X_const)
+    
+    # Thresholds
+    leverage_threshold = 2 * (p + 1) / n
+    cooks_threshold = 4 / n
+    dffits_threshold = 2 * np.sqrt((p + 1) / n)
+    
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    
+    # Plot 1: Studentized Residuals vs Leverage
+    ax = axes[0, 0]
+    
+    h_range = np.linspace(0.001, leverage.max() * 1.1, 100)
+    for d_val in [0.5, 1.0]:
+        r_pos = np.sqrt(d_val * (p + 1) * (1 - h_range) / h_range)
+        r_neg = -r_pos
+        valid = ~np.isnan(r_pos) & ~np.isinf(r_pos)
+        ax.plot(h_range[valid], r_pos[valid], 'r--', alpha=0.5)
+        ax.plot(h_range[valid], r_neg[valid], 'r--', alpha=0.5)
+    
+    colors = np.where(cooks_d > cooks_threshold, 'red', 
+                     np.where(leverage > leverage_threshold, 'orange', 'steelblue'))
+    
+    ax.scatter(leverage, stud_resid, c=colors, s=60, alpha=0.7, edgecolors='black', linewidth=0.5)
+    ax.axhline(y=-2, color='gray', linestyle='--', alpha=0.5)
+    ax.axhline(y=2, color='gray', linestyle='--', alpha=0.5)
+    ax.axvline(x=leverage_threshold, color='orange', linestyle='--', alpha=0.5, label='Leverage threshold')
+    ax.set_xlabel('Leverage (Hat Value)')
+    ax.set_ylabel('Studentized Residual')
+    ax.set_title('Influence Plot: Residuals vs Leverage')
+    ax.legend(loc='best')
+    
+    top_influence = np.argsort(cooks_d)[-5:]
+    for i in top_influence:
+        if cooks_d[i] > cooks_threshold:
+            ax.annotate(str(i), (leverage[i], stud_resid[i]), fontsize=8)
+    
+    # Plot 2: Cook's D Bar Chart
+    ax = axes[0, 1]
+    indices = np.arange(n)
+    colors = np.where(cooks_d > cooks_threshold, 'red', 'steelblue')
+    ax.bar(indices, cooks_d, color=colors, alpha=0.7, edgecolor='black', linewidth=0.3)
+    ax.axhline(y=cooks_threshold, color='red', linestyle='--', label=f'Threshold (4/n = {cooks_threshold:.4f})')
+    ax.axhline(y=1.0, color='darkred', linestyle='-', alpha=0.5, label='Cook\'s D = 1')
+    ax.set_xlabel('Observation Index')
+    ax.set_ylabel("Cook's Distance")
+    ax.set_title("Cook's Distance by Observation")
+    ax.legend(loc='best')
+    
+    # Plot 3: DFFITS
+    ax = axes[1, 0]
+    colors = np.where(np.abs(dffits) > dffits_threshold, 'red', 'steelblue')
+    ax.scatter(indices, dffits, c=colors, s=50, alpha=0.7, edgecolors='black', linewidth=0.5)
+    ax.axhline(y=dffits_threshold, color='red', linestyle='--', label=f'Threshold (±{dffits_threshold:.3f})')
+    ax.axhline(y=-dffits_threshold, color='red', linestyle='--')
+    ax.axhline(y=0, color='gray', linestyle='-', alpha=0.5)
+    ax.set_xlabel('Observation Index')
+    ax.set_ylabel('DFFITS')
+    ax.set_title('DFFITS (Standardized Difference in Fits)')
+    ax.legend(loc='best')
+    
+    # Plot 4: Residuals vs Fitted
+    ax = axes[1, 1]
+    residuals = model.resid
+    
+    sizes = 50 + 500 * (cooks_d / (cooks_d.max() + 1e-10))
+    colors = np.where(cooks_d > cooks_threshold, 'red',
+                     np.where(leverage > leverage_threshold, 'orange', 'steelblue'))
+    
+    ax.scatter(predicted, residuals, c=colors, s=sizes, alpha=0.6, edgecolors='black', linewidth=0.5)
+    ax.axhline(y=0, color='red', linestyle='--')
+    
+    try:
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+        smoothed = lowess(residuals, predicted, frac=0.5)
+        ax.plot(smoothed[:, 0], smoothed[:, 1], 'g-', lw=2, label='LOWESS')
+    except:
+        pass
+    
+    ax.set_xlabel('Fitted Values')
+    ax.set_ylabel('Residuals')
+    ax.set_title('Residuals vs Fitted (size = Cook\'s D)')
+    
+    plt.suptitle('Influence Diagnostics Dashboard', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    return fig
+
+
+def plot_partial_regression(
+    y: Union[pd.Series, np.ndarray],
+    X: pd.DataFrame,
+    variable: str,
+    figsize: Tuple[int, int] = (10, 8)
+) -> Optional[Any]:
+    """Create partial regression plot for a single variable."""
+    if not HAS_MATPLOTLIB or not HAS_STATSMODELS:
+        return None
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    sm.graphics.plot_partregress(endog=y, exog_i=variable, exog_others=X.drop(columns=[variable]),
+                                  obs_labels=False, ax=ax)
+    ax.set_title(f'Partial Regression Plot: {variable}')
+    plt.tight_layout()
+    return fig
+
+
+def plot_added_variable(
+    y: Union[pd.Series, np.ndarray],
+    X: pd.DataFrame,
+    figsize: Tuple[int, int] = (14, 10)
+) -> Optional[Any]:
+    """Create added variable plots for all predictors (JMP-style)."""
+    if not HAS_MATPLOTLIB or not HAS_STATSMODELS:
+        return None
+    
+    fig = sm.graphics.plot_partregress_grid(
+        sm.OLS(y, sm.add_constant(X)).fit(),
+        fig=plt.figure(figsize=figsize)
+    )
+    plt.suptitle('Added Variable Plots (Partial Regression)', fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    return fig
+
+
+def plot_component_residual(
+    y: Union[pd.Series, np.ndarray],
+    X: pd.DataFrame,
+    figsize: Tuple[int, int] = (14, 10)
+) -> Optional[Any]:
+    """Create component-plus-residual plots (CCPR plots) for all predictors."""
+    if not HAS_MATPLOTLIB or not HAS_STATSMODELS:
+        return None
+    
+    model = sm.OLS(y, sm.add_constant(X)).fit()
+    fig = sm.graphics.plot_ccpr_grid(model, fig=plt.figure(figsize=figsize))
+    plt.suptitle('Component-Plus-Residual Plots', fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    return fig
+
+
+# =============================================================================
+# NEW v2.0: PREDICTION PROFILER
+# =============================================================================
+
+@dataclass
+class PredictionProfiler:
+    """Container for prediction profiler results."""
+    model: Any
+    X_names: List[str]
+    X_ranges: Dict[str, Tuple[float, float]]
+    X_current: Dict[str, float]
+    y_name: str
+    prediction: float
+    conf_interval: Tuple[float, float]
+    pred_interval: Tuple[float, float]
+    
+    def predict_at(self, **kwargs) -> Dict[str, Any]:
+        """Make prediction at specified values."""
+        X_vals = self.X_current.copy()
+        X_vals.update(kwargs)
+        
+        X_arr = np.array([[X_vals[name] for name in self.X_names]])
+        X_const = sm.add_constant(X_arr, has_constant='add')
+        
+        pred = self.model.get_prediction(X_const)
+        
+        return {
+            'prediction': float(pred.predicted_mean[0]),
+            'conf_interval': tuple(pred.conf_int(alpha=0.05)[0]),
+            'pred_interval': tuple(pred.conf_int(obs=True, alpha=0.05)[0]),
+            'x_values': X_vals
+        }
+    
+    def __str__(self):
+        x_str = ', '.join([f'{k}={v:.4f}' for k, v in self.X_current.items()])
+        return f"""
+Prediction Profiler
+===================
+Response: {self.y_name}
+Predictors: {', '.join(self.X_names)}
+
+Current Settings:
+  {x_str}
+
+Prediction:        {self.prediction:.6f}
+95% Confidence:    [{self.conf_interval[0]:.6f}, {self.conf_interval[1]:.6f}]
+95% Prediction:    [{self.pred_interval[0]:.6f}, {self.pred_interval[1]:.6f}]
+"""
+
+
+def prediction_profiler(
+    y: Union[pd.Series, np.ndarray],
+    X: pd.DataFrame,
+    y_name: str = 'Y',
+    initial_values: Optional[Dict[str, float]] = None
+) -> PredictionProfiler:
+    """
+    Create a JMP-style prediction profiler for exploring model predictions.
+    
+    Parameters
+    ----------
+    y : array-like
+        Response variable
+    X : DataFrame
+        Predictor variables
+    y_name : str, default='Y'
+        Name of the response variable
+    initial_values : dict, optional
+        Initial values for predictors. Defaults to means.
+        
+    Returns
+    -------
+    PredictionProfiler
+        Interactive profiler object
+        
+    Example
+    -------
+    >>> profiler = prediction_profiler(df['sales'], df[['price', 'advertising']])
+    >>> print(profiler)
+    >>> result = profiler.predict_at(price=10.0, advertising=5000)
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels required")
+    
+    X_names = list(X.columns)
+    
+    y = np.asarray(y).flatten()
+    mask = ~(np.isnan(y) | X.isna().any(axis=1))
+    y_clean = y[mask]
+    X_clean = X[mask]
+    
+    X_const = sm.add_constant(X_clean)
+    model = sm.OLS(y_clean, X_const).fit()
+    
+    X_ranges = {col: (X_clean[col].min(), X_clean[col].max()) for col in X_names}
+    
+    if initial_values is None:
+        X_current = {col: X_clean[col].mean() for col in X_names}
+    else:
+        X_current = {col: initial_values.get(col, X_clean[col].mean()) for col in X_names}
+    
+    X_arr = np.array([[X_current[name] for name in X_names]])
+    X_pred = sm.add_constant(X_arr, has_constant='add')
+    pred = model.get_prediction(X_pred)
+    
+    return PredictionProfiler(
+        model=model,
+        X_names=X_names,
+        X_ranges=X_ranges,
+        X_current=X_current,
+        y_name=y_name,
+        prediction=float(pred.predicted_mean[0]),
+        conf_interval=tuple(pred.conf_int(alpha=0.05)[0]),
+        pred_interval=tuple(pred.conf_int(obs=True, alpha=0.05)[0])
+    )
+
+
+def plot_prediction_profiler(
+    profiler: PredictionProfiler,
+    n_points: int = 50,
+    figsize: Tuple[int, int] = (14, 4)
+) -> Optional[Any]:
+    """
+    Create visual representation of the prediction profiler (JMP-style).
+    
+    Parameters
+    ----------
+    profiler : PredictionProfiler
+        Profiler object from prediction_profiler()
+    n_points : int, default=50
+        Number of points for each profile line
+    figsize : tuple
+        Figure size
+        
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    n_vars = len(profiler.X_names)
+    fig_width = max(14, n_vars * 3.5)
+    
+    fig, axes = plt.subplots(1, n_vars, figsize=(fig_width, figsize[1]))
+    if n_vars == 1:
+        axes = [axes]
+    
+    for idx, var_name in enumerate(profiler.X_names):
+        ax = axes[idx]
+        
+        var_min, var_max = profiler.X_ranges[var_name]
+        var_values = np.linspace(var_min, var_max, n_points)
+        
+        predictions = []
+        conf_low = []
+        conf_high = []
+        
+        for val in var_values:
+            X_vals = profiler.X_current.copy()
+            X_vals[var_name] = val
+            X_arr = np.array([[X_vals[name] for name in profiler.X_names]])
+            X_const = sm.add_constant(X_arr, has_constant='add')
+            
+            pred = profiler.model.get_prediction(X_const)
+            predictions.append(pred.predicted_mean[0])
+            ci = pred.conf_int(alpha=0.05)[0]
+            conf_low.append(ci[0])
+            conf_high.append(ci[1])
+        
+        ax.plot(var_values, predictions, 'b-', lw=2, label='Prediction')
+        ax.fill_between(var_values, conf_low, conf_high, alpha=0.2, color='blue', label='95% CI')
+        
+        current_val = profiler.X_current[var_name]
+        ax.axvline(x=current_val, color='red', linestyle='--', lw=1.5, label='Current')
+        ax.axhline(y=profiler.prediction, color='gray', linestyle=':', alpha=0.5)
+        ax.scatter([current_val], [profiler.prediction], color='red', s=100, zorder=5)
+        
+        ax.set_xlabel(var_name)
+        ax.set_ylabel(profiler.y_name if idx == 0 else '')
+        ax.set_title(f'{var_name}')
+        
+        if idx == 0:
+            ax.legend(loc='best', fontsize=8)
+    
+    plt.suptitle(f'Prediction Profiler: {profiler.y_name} = {profiler.prediction:.4f}', 
+                 fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    return fig
+
+
+# =============================================================================
+# NEW v2.0: DESIGN OF EXPERIMENTS (DoE)
+# =============================================================================
+
+@dataclass
+class FactorialDesignResults:
+    """Container for factorial design analysis results."""
+    design_matrix: pd.DataFrame
+    effects: Dict[str, float]
+    effects_se: Dict[str, float]
+    effects_tstat: Dict[str, float]
+    effects_pvalue: Dict[str, float]
+    anova_table: pd.DataFrame
+    significant_effects: List[str]
+    r_squared: float
+    adj_r_squared: float
+    
+    def __str__(self):
+        sig_effects = ', '.join(self.significant_effects) if self.significant_effects else 'None'
+        effects_str = '\n'.join([f"  {k}: {v:.4f} (p={self.effects_pvalue[k]:.4f})" 
+                                  for k, v in list(self.effects.items())[:10]])
+        return f"""
+Factorial Design Analysis
+=========================
+R-Squared:              {self.r_squared:.6f}
+Adj R-Squared:          {self.adj_r_squared:.6f}
+
+Significant Effects (α=0.05):
+  {sig_effects}
+
+Effect Estimates:
+{effects_str}
+"""
+
+
+@dataclass 
+class EffectScreeningResults:
+    """Container for effect screening results."""
+    effects: pd.DataFrame
+    significant: List[str]
+    pareto_fig: Optional[Any]
+    half_normal_fig: Optional[Any]
+    lenth_pse: float
+    
+    def __str__(self):
+        return f"""
+Effect Screening Results
+========================
+Lenth's PSE:            {self.lenth_pse:.6f}
+Significant Effects:    {', '.join(self.significant) if self.significant else 'None'}
+
+Effect Magnitudes:
+{self.effects.head(10).to_string()}
+"""
+
+
+@dataclass
+class ResponseSurfaceResults:
+    """Container for response surface design and analysis."""
+    design_matrix: pd.DataFrame
+    design_type: str
+    factors: List[str]
+    center_points: int
+    model: Optional[Any]
+    optimal_settings: Optional[Dict[str, float]]
+    predicted_optimum: Optional[float]
+    
+    def __str__(self):
+        opt_str = ""
+        if self.optimal_settings:
+            opt_str = f"\nOptimal Settings:\n"
+            for k, v in self.optimal_settings.items():
+                opt_str += f"  {k}: {v:.4f}\n"
+            opt_str += f"\nPredicted Optimum: {self.predicted_optimum:.6f}"
+        
+        return f"""
+Response Surface Design
+=======================
+Design Type:            {self.design_type}
+Factors:                {', '.join(self.factors)}
+Center Points:          {self.center_points}
+Total Runs:             {len(self.design_matrix)}
+{opt_str}
+"""
+
+
+def fractional_factorial_design(
+    factors: Dict[str, Tuple[float, float]],
+    resolution: int = 4,
+    center_points: int = 0,
+    replicates: int = 1
+) -> pd.DataFrame:
+    """
+    Create a fractional factorial design matrix.
+    
+    Parameters
+    ----------
+    factors : dict
+        Dictionary of factor names to (low, high) value tuples
+    resolution : int, default=4
+        Design resolution (3, 4, or 5)
+    center_points : int, default=0
+        Number of center points to add
+    replicates : int, default=1
+        Number of replicates
+        
+    Returns
+    -------
+    pd.DataFrame
+        Design matrix with factor values
+    """
+    factor_names = list(factors.keys())
+    k = len(factor_names)
+    
+    if k <= 4:
+        n_runs = 2 ** k
+        coded = np.array(list(np.ndindex(*([2] * k)))) * 2 - 1
+    else:
+        if resolution >= 5:
+            p = 1
+        elif resolution == 4:
+            p = max(1, k - 4)
+        else:
+            p = max(1, k - 3)
+        
+        n_base = k - p
+        base_design = np.array(list(np.ndindex(*([2] * n_base)))) * 2 - 1
+        
+        coded = np.zeros((len(base_design), k))
+        coded[:, :n_base] = base_design
+        
+        for i in range(p):
+            cols_to_multiply = list(range(min(i + 2, n_base)))
+            coded[:, n_base + i] = np.prod(base_design[:, cols_to_multiply], axis=1)
+    
+    design = pd.DataFrame(coded, columns=factor_names)
+    for col in factor_names:
+        low, high = factors[col]
+        mid = (low + high) / 2
+        half_range = (high - low) / 2
+        design[col] = mid + design[col] * half_range
+    
+    if center_points > 0:
+        center_row = {col: (factors[col][0] + factors[col][1]) / 2 for col in factor_names}
+        center_df = pd.DataFrame([center_row] * center_points)
+        design = pd.concat([design, center_df], ignore_index=True)
+    
+    if replicates > 1:
+        design = pd.concat([design] * replicates, ignore_index=True)
+    
+    design.insert(0, 'Run', range(1, len(design) + 1))
+    design['RunOrder'] = np.random.permutation(len(design)) + 1
+    
+    return design.sort_values('RunOrder').reset_index(drop=True)
+
+
+def response_surface_design(
+    factors: Dict[str, Tuple[float, float]],
+    design_type: str = 'ccd',
+    center_points: int = 5,
+    alpha: Optional[float] = None
+) -> ResponseSurfaceResults:
+    """
+    Create a response surface design (Central Composite or Box-Behnken).
+    
+    Parameters
+    ----------
+    factors : dict
+        Dictionary of factor names to (low, high) value tuples
+    design_type : str, default='ccd'
+        Type of design: 'ccd', 'ccf', 'cci', or 'bbd'
+    center_points : int, default=5
+        Number of center points
+    alpha : float, optional
+        Axial distance for CCD
+        
+    Returns
+    -------
+    ResponseSurfaceResults
+    """
+    factor_names = list(factors.keys())
+    k = len(factor_names)
+    
+    if design_type.lower() in ['ccd', 'ccf', 'cci']:
+        factorial = np.array(list(np.ndindex(*([2] * k)))) * 2 - 1
+        
+        if alpha is None:
+            if design_type.lower() == 'ccf':
+                alpha = 1.0
+            elif design_type.lower() == 'cci':
+                alpha = 1.0 / np.sqrt(k)
+            else:
+                alpha = (2 ** k) ** 0.25
+        
+        axial = np.zeros((2 * k, k))
+        for i in range(k):
+            axial[2*i, i] = -alpha
+            axial[2*i + 1, i] = alpha
+        
+        center = np.zeros((center_points, k))
+        coded = np.vstack([factorial, axial, center])
+        
+    elif design_type.lower() == 'bbd':
+        if k < 3:
+            raise ValueError("Box-Behnken design requires at least 3 factors")
+        
+        from itertools import combinations
+        
+        points = []
+        for pair in combinations(range(k), 2):
+            for signs in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+                point = [0] * k
+                point[pair[0]] = signs[0]
+                point[pair[1]] = signs[1]
+                points.append(point)
+        
+        for _ in range(center_points):
+            points.append([0] * k)
+        
+        coded = np.array(points)
+    else:
+        raise ValueError(f"Unknown design type: {design_type}")
+    
+    design = pd.DataFrame(coded, columns=factor_names)
+    for col in factor_names:
+        low, high = factors[col]
+        mid = (low + high) / 2
+        half_range = (high - low) / 2
+        design[col] = mid + design[col] * half_range
+    
+    design.insert(0, 'Run', range(1, len(design) + 1))
+    design['RunOrder'] = np.random.permutation(len(design)) + 1
+    design = design.sort_values('RunOrder').reset_index(drop=True)
+    
+    return ResponseSurfaceResults(
+        design_matrix=design,
+        design_type=design_type.upper(),
+        factors=factor_names,
+        center_points=center_points,
+        model=None,
+        optimal_settings=None,
+        predicted_optimum=None
+    )
+
+
+def optimal_design(
+    factors: Dict[str, Tuple[float, float]],
+    n_runs: int,
+    model_type: str = 'quadratic',
+    criterion: str = 'd-optimal',
+    n_starts: int = 10
+) -> pd.DataFrame:
+    """
+    Generate D-optimal or I-optimal design.
+    
+    Parameters
+    ----------
+    factors : dict
+        Factor names to (low, high) tuples
+    n_runs : int
+        Number of experimental runs
+    model_type : str, default='quadratic'
+        Type of model: 'linear', 'interaction', 'quadratic'
+    criterion : str, default='d-optimal'
+        Optimality criterion
+    n_starts : int, default=10
+        Number of random starts
+        
+    Returns
+    -------
+    pd.DataFrame
+        Optimal design matrix
+    """
+    factor_names = list(factors.keys())
+    k = len(factor_names)
+    
+    n_candidates = max(100, n_runs * 10)
+    candidates = np.random.uniform(-1, 1, (n_candidates, k))
+    
+    corners = np.array(list(np.ndindex(*([2] * k)))) * 2 - 1
+    center = np.zeros((1, k))
+    axials = np.vstack([np.eye(k), -np.eye(k)])
+    
+    candidates = np.vstack([candidates, corners, center, axials])
+    
+    def expand_model_matrix(X, model_type):
+        n = X.shape[0]
+        cols = [np.ones(n)]
+        
+        for j in range(k):
+            cols.append(X[:, j])
+        
+        if model_type in ['interaction', 'quadratic']:
+            for i in range(k):
+                for j in range(i + 1, k):
+                    cols.append(X[:, i] * X[:, j])
+        
+        if model_type == 'quadratic':
+            for j in range(k):
+                cols.append(X[:, j] ** 2)
+        
+        return np.column_stack(cols)
+    
+    best_design = None
+    best_criterion = -np.inf if criterion == 'd-optimal' else np.inf
+    
+    for _ in range(n_starts):
+        indices = np.random.choice(len(candidates), n_runs, replace=False)
+        design = candidates[indices].copy()
+        
+        for iteration in range(50):
+            improved = False
+            for i in range(n_runs):
+                current_X = expand_model_matrix(design, model_type)
+                
+                try:
+                    if criterion == 'd-optimal':
+                        current_det = np.linalg.det(current_X.T @ current_X)
+                    else:
+                        current_trace = np.trace(np.linalg.inv(current_X.T @ current_X))
+                except:
+                    continue
+                
+                for j, candidate in enumerate(candidates[:100]):
+                    if any(np.allclose(design[ii], candidate) for ii in range(n_runs) if ii != i):
+                        continue
+                    
+                    test_design = design.copy()
+                    test_design[i] = candidate
+                    test_X = expand_model_matrix(test_design, model_type)
+                    
+                    try:
+                        if criterion == 'd-optimal':
+                            test_det = np.linalg.det(test_X.T @ test_X)
+                            if test_det > current_det * 1.001:
+                                design = test_design
+                                current_det = test_det
+                                improved = True
+                        else:
+                            test_trace = np.trace(np.linalg.inv(test_X.T @ test_X))
+                            if test_trace < current_trace * 0.999:
+                                design = test_design
+                                current_trace = test_trace
+                                improved = True
+                    except:
+                        continue
+            
+            if not improved:
+                break
+        
+        final_X = expand_model_matrix(design, model_type)
+        try:
+            if criterion == 'd-optimal':
+                crit_val = np.linalg.det(final_X.T @ final_X)
+                if crit_val > best_criterion:
+                    best_criterion = crit_val
+                    best_design = design.copy()
+            else:
+                crit_val = np.trace(np.linalg.inv(final_X.T @ final_X))
+                if crit_val < best_criterion:
+                    best_criterion = crit_val
+                    best_design = design.copy()
+        except:
+            continue
+    
+    if best_design is None:
+        best_design = candidates[:n_runs]
+    
+    result = pd.DataFrame(best_design, columns=factor_names)
+    for col in factor_names:
+        low, high = factors[col]
+        mid = (low + high) / 2
+        half_range = (high - low) / 2
+        result[col] = mid + result[col] * half_range
+    
+    result.insert(0, 'Run', range(1, len(result) + 1))
+    return result
+
+
+def analyze_factorial(
+    design: pd.DataFrame,
+    response: str,
+    factors: List[str],
+    include_interactions: bool = True,
+    alpha: float = 0.05
+) -> FactorialDesignResults:
+    """
+    Analyze a factorial experiment.
+    
+    Parameters
+    ----------
+    design : DataFrame
+        Design matrix with response
+    response : str
+        Name of response column
+    factors : list
+        Names of factor columns
+    include_interactions : bool, default=True
+        Include 2-way interactions
+    alpha : float, default=0.05
+        Significance level
+        
+    Returns
+    -------
+    FactorialDesignResults
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels required")
+    
+    y = design[response].values
+    
+    X_coded = pd.DataFrame()
+    factor_means = {}
+    factor_ranges = {}
+    
+    for factor in factors:
+        vals = design[factor].values
+        factor_means[factor] = vals.mean()
+        factor_ranges[factor] = (vals.max() - vals.min()) / 2
+        if factor_ranges[factor] == 0:
+            factor_ranges[factor] = 1
+        X_coded[factor] = (vals - factor_means[factor]) / factor_ranges[factor]
+    
+    if include_interactions:
+        for i, f1 in enumerate(factors):
+            for f2 in factors[i+1:]:
+                interaction_name = f'{f1}*{f2}'
+                X_coded[interaction_name] = X_coded[f1] * X_coded[f2]
+    
+    X_const = sm.add_constant(X_coded)
+    model = sm.OLS(y, X_const).fit()
+    
+    effects = {}
+    effects_se = {}
+    effects_tstat = {}
+    effects_pvalue = {}
+    
+    for i, name in enumerate(X_coded.columns):
+        idx = i + 1
+        effects[name] = float(model.params[idx] * 2)
+        effects_se[name] = float(model.bse[idx] * 2)
+        effects_tstat[name] = float(model.tvalues[idx])
+        effects_pvalue[name] = float(model.pvalues[idx])
+    
+    significant = [name for name, pval in effects_pvalue.items() if pval < alpha]
+    
+    anova_data = {
+        'Source': list(effects.keys()) + ['Error', 'Total'],
+        'DF': [1] * len(effects) + [int(model.df_resid), int(model.df_model + model.df_resid)],
+        'F Ratio': [float(model.tvalues[i+1]**2) for i in range(len(effects))] + [np.nan, np.nan],
+        'Prob > F': list(effects_pvalue.values()) + [np.nan, np.nan]
+    }
+    anova_df = pd.DataFrame(anova_data)
+    
+    return FactorialDesignResults(
+        design_matrix=design,
+        effects=effects,
+        effects_se=effects_se,
+        effects_tstat=effects_tstat,
+        effects_pvalue=effects_pvalue,
+        anova_table=anova_df,
+        significant_effects=significant,
+        r_squared=float(model.rsquared),
+        adj_r_squared=float(model.rsquared_adj)
+    )
+
+
+def effect_screening(
+    design: pd.DataFrame,
+    response: str,
+    factors: List[str],
+    method: str = 'lenth',
+    alpha: float = 0.05,
+    plot: bool = True
+) -> EffectScreeningResults:
+    """
+    Screen effects using Lenth's method.
+    
+    Parameters
+    ----------
+    design : DataFrame
+        Design matrix with response
+    response : str
+        Response column name
+    factors : list
+        Factor column names
+    method : str, default='lenth'
+        Screening method
+    alpha : float, default=0.05
+        Significance level
+    plot : bool, default=True
+        Generate plots
+        
+    Returns
+    -------
+    EffectScreeningResults
+    """
+    y = design[response].values
+    
+    effects_list = []
+    for factor in factors:
+        vals = design[factor].values
+        val_range = vals.max() - vals.min()
+        if val_range == 0:
+            val_range = 1
+        coded = (vals - vals.mean()) / (val_range / 2)
+        corr = np.corrcoef(coded, y)[0, 1]
+        if np.isnan(corr):
+            corr = 0
+        effect = 2 * corr * np.std(y) / (np.std(coded) + 1e-10)
+        effects_list.append({'Factor': factor, 'Effect': effect, 'AbsEffect': abs(effect)})
+    
+    effects_df = pd.DataFrame(effects_list).sort_values('AbsEffect', ascending=False)
+    
+    abs_effects = effects_df['AbsEffect'].values
+    abs_effects = abs_effects[abs_effects > 0]
+    if len(abs_effects) == 0:
+        abs_effects = np.array([1.0])
+    
+    s0 = 1.5 * np.median(abs_effects)
+    filtered = abs_effects[abs_effects < 2.5 * s0]
+    if len(filtered) == 0:
+        filtered = abs_effects
+    pse = 1.5 * np.median(filtered)
+    
+    m = len(effects_list)
+    t_crit = 2.0 + 0.5 * np.log(max(m, 1))
+    me = t_crit * pse
+    
+    significant = list(effects_df[effects_df['AbsEffect'] > me]['Factor'])
+    
+    pareto_fig = None
+    half_normal_fig = None
+    
+    if plot and HAS_MATPLOTLIB:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        colors = ['red' if f in significant else 'steelblue' for f in effects_df['Factor']]
+        ax.barh(range(len(effects_df)), effects_df['AbsEffect'].values, color=colors)
+        ax.set_yticks(range(len(effects_df)))
+        ax.set_yticklabels(effects_df['Factor'].values)
+        ax.axvline(x=me, color='red', linestyle='--', label=f'Margin of Error ({me:.4f})')
+        ax.set_xlabel('|Effect|')
+        ax.set_title('Pareto Chart of Effects')
+        ax.legend()
+        ax.invert_yaxis()
+        plt.tight_layout()
+        pareto_fig = fig
+        
+        fig2, ax2 = plt.subplots(figsize=(8, 6))
+        all_abs = effects_df['AbsEffect'].values
+        sorted_effects = np.sort(all_abs)
+        n = len(sorted_effects)
+        expected = [norm.ppf((i + 0.5) / n) for i in range(n)]
+        
+        colors = ['red' if e > me else 'steelblue' for e in sorted_effects]
+        ax2.scatter(expected, sorted_effects, c=colors, s=60)
+        
+        ax2.set_xlabel('Half-Normal Quantiles')
+        ax2.set_ylabel('|Effect|')
+        ax2.set_title('Half-Normal Plot of Effects')
+        plt.tight_layout()
+        half_normal_fig = fig2
+    
+    return EffectScreeningResults(
+        effects=effects_df,
+        significant=significant,
+        pareto_fig=pareto_fig,
+        half_normal_fig=half_normal_fig,
+        lenth_pse=pse
+    )
+
+
+def interaction_plot(
+    design: pd.DataFrame,
+    response: str,
+    factor1: str,
+    factor2: str,
+    figsize: Tuple[int, int] = (10, 6)
+) -> Optional[Any]:
+    """Create interaction plot for two factors."""
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    levels1 = sorted(design[factor1].unique())
+    levels2 = sorted(design[factor2].unique())
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    for level2 in levels2:
+        means = []
+        for level1 in levels1:
+            mask = (design[factor1] == level1) & (design[factor2] == level2)
+            means.append(design.loc[mask, response].mean())
+        
+        ax.plot(range(len(levels1)), means, 'o-', label=f'{factor2}={level2}', markersize=8)
+    
+    ax.set_xticks(range(len(levels1)))
+    ax.set_xticklabels([str(l) for l in levels1])
+    ax.set_xlabel(factor1)
+    ax.set_ylabel(f'Mean {response}')
+    ax.set_title(f'Interaction Plot: {factor1} × {factor2}')
+    ax.legend(title=factor2)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+
+def main_effects_plot(
+    design: pd.DataFrame,
+    response: str,
+    factors: List[str],
+    figsize: Tuple[int, int] = (14, 4)
+) -> Optional[Any]:
+    """Create main effects plots for all factors."""
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    n_factors = len(factors)
+    fig, axes = plt.subplots(1, n_factors, figsize=(figsize[0], figsize[1]))
+    if n_factors == 1:
+        axes = [axes]
+    
+    overall_mean = design[response].mean()
+    
+    for idx, factor in enumerate(factors):
+        ax = axes[idx]
+        levels = sorted(design[factor].unique())
+        means = [design[design[factor] == level][response].mean() for level in levels]
+        
+        ax.plot(range(len(levels)), means, 'bo-', markersize=10)
+        ax.axhline(y=overall_mean, color='gray', linestyle='--', label='Grand Mean')
+        ax.set_xticks(range(len(levels)))
+        ax.set_xticklabels([f'{l:.2f}' if isinstance(l, float) else str(l) for l in levels])
+        ax.set_xlabel(factor)
+        ax.set_ylabel(f'Mean {response}' if idx == 0 else '')
+        ax.set_title(factor)
+        ax.grid(True, alpha=0.3)
+    
+    plt.suptitle('Main Effects Plots', fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    return fig
+
+
+def contour_profiler(
+    model,
+    factor1: str,
+    factor2: str,
+    factor_ranges: Dict[str, Tuple[float, float]],
+    fixed_values: Optional[Dict[str, float]] = None,
+    response_name: str = 'Y',
+    n_points: int = 50,
+    figsize: Tuple[int, int] = (10, 8)
+) -> Optional[Any]:
+    """Create contour plot profiler for response surface."""
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    factors = list(factor_ranges.keys())
+    
+    if fixed_values is None:
+        fixed_values = {f: (factor_ranges[f][0] + factor_ranges[f][1]) / 2 
+                       for f in factors if f not in [factor1, factor2]}
+    
+    x1_range = np.linspace(factor_ranges[factor1][0], factor_ranges[factor1][1], n_points)
+    x2_range = np.linspace(factor_ranges[factor2][0], factor_ranges[factor2][1], n_points)
+    X1, X2 = np.meshgrid(x1_range, x2_range)
+    
+    Z = np.zeros_like(X1)
+    for i in range(n_points):
+        for j in range(n_points):
+            X_dict = fixed_values.copy()
+            X_dict[factor1] = X1[i, j]
+            X_dict[factor2] = X2[i, j]
+            X_arr = np.array([[X_dict[f] for f in factors]])
+            X_const = sm.add_constant(X_arr, has_constant='add')
+            Z[i, j] = model.predict(X_const)[0]
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    cs = ax.contourf(X1, X2, Z, levels=20, cmap='RdYlGn')
+    plt.colorbar(cs, ax=ax, label=response_name)
+    ax.contour(X1, X2, Z, levels=10, colors='black', linewidths=0.5)
+    
+    ax.set_xlabel(factor1)
+    ax.set_ylabel(factor2)
+    ax.set_title(f'Contour Profiler: {response_name}')
+    
+    opt_idx = np.unravel_index(np.argmax(Z), Z.shape)
+    ax.plot(X1[opt_idx], X2[opt_idx], 'w*', markersize=15, markeredgecolor='black')
+    
+    plt.tight_layout()
+    return fig
+
+
+def pareto_of_effects(
+    effects: Dict[str, float],
+    threshold: Optional[float] = None,
+    figsize: Tuple[int, int] = (10, 6)
+) -> Optional[Any]:
+    """Create Pareto chart of effects."""
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    sorted_effects = sorted(effects.items(), key=lambda x: abs(x[1]), reverse=True)
+    names = [e[0] for e in sorted_effects]
+    values = [abs(e[1]) for e in sorted_effects]
+    signs = ['positive' if e[1] > 0 else 'negative' for e in sorted_effects]
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    colors = ['steelblue' if s == 'positive' else 'coral' for s in signs]
+    ax.barh(range(len(names)), values, color=colors)
+    
+    if threshold is not None:
+        ax.axvline(x=threshold, color='red', linestyle='--', label=f'Threshold ({threshold:.3f})')
+        ax.legend()
+    
+    ax.set_yticks(range(len(names)))
+    ax.set_yticklabels(names)
+    ax.set_xlabel('|Effect|')
+    ax.set_title('Pareto Chart of Effects')
+    ax.invert_yaxis()
+    
+    plt.tight_layout()
+    return fig
+
+
+# =============================================================================
+# NEW v2.0: TIME SERIES ANALYSIS
+# =============================================================================
+
+@dataclass
+class ARIMAResults:
+    """Container for ARIMA model results."""
+    order: Tuple[int, int, int]
+    seasonal_order: Optional[Tuple[int, int, int, int]]
+    model: Any
+    aic: float
+    bic: float
+    coefficients: Dict[str, float]
+    residuals: np.ndarray
+    fitted_values: np.ndarray
+    forecast: Optional[np.ndarray]
+    forecast_ci: Optional[np.ndarray]
+    diagnostics: Dict[str, Any]
+    
+    def __str__(self):
+        order_str = f"ARIMA{self.order}"
+        if self.seasonal_order:
+            order_str += f"x{self.seasonal_order}"
+        
+        coef_str = '\n'.join([f"  {k}: {v:.6f}" for k, v in list(self.coefficients.items())[:5]])
+        
+        return f"""
+ARIMA Model Results
+===================
+Model: {order_str}
+AIC: {self.aic:.2f}
+BIC: {self.bic:.2f}
+
+Coefficients:
+{coef_str}
+
+Residual Diagnostics:
+  Ljung-Box p-value: {self.diagnostics.get('ljung_box_pvalue', np.nan):.4f}
+"""
+    
+    def predict(self, steps: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+        """Generate forecasts with confidence intervals."""
+        forecast = self.model.get_forecast(steps=steps)
+        return forecast.predicted_mean.values, forecast.conf_int().values
+
+
+@dataclass
+class ExponentialSmoothingResults:
+    """Container for exponential smoothing results."""
+    method: str
+    alpha: float
+    beta: Optional[float]
+    gamma: Optional[float]
+    seasonal_periods: Optional[int]
+    model: Any
+    aic: float
+    fitted_values: np.ndarray
+    residuals: np.ndarray
+    forecast: Optional[np.ndarray]
+    forecast_ci: Optional[np.ndarray]
+    
+    def __str__(self):
+        params = f"α={self.alpha:.4f}"
+        if self.beta is not None:
+            params += f", β={self.beta:.4f}"
+        if self.gamma is not None:
+            params += f", γ={self.gamma:.4f}"
+        
+        return f"""
+Exponential Smoothing Results
+=============================
+Method: {self.method}
+Parameters: {params}
+Seasonal Periods: {self.seasonal_periods or 'None'}
+AIC: {self.aic:.2f}
+"""
+
+
+@dataclass
+class TimeSeriesDecomposition:
+    """Container for time series decomposition."""
+    observed: np.ndarray
+    trend: np.ndarray
+    seasonal: np.ndarray
+    residual: np.ndarray
+    period: int
+    method: str
+    
+    def __str__(self):
+        return f"""
+Time Series Decomposition
+=========================
+Method: {self.method}
+Period: {self.period}
+Observations: {len(self.observed)}
+"""
+
+
+@dataclass
+class AutocorrelationResults:
+    """Container for ACF/PACF analysis."""
+    acf_values: np.ndarray
+    pacf_values: np.ndarray
+    acf_conf_int: np.ndarray
+    pacf_conf_int: np.ndarray
+    n_lags: int
+    significant_acf_lags: List[int]
+    significant_pacf_lags: List[int]
+    suggested_ar_order: int
+    suggested_ma_order: int
+    
+    def __str__(self):
+        return f"""
+Autocorrelation Analysis
+========================
+Lags Analyzed: {self.n_lags}
+Significant ACF Lags: {self.significant_acf_lags[:10]}
+Significant PACF Lags: {self.significant_pacf_lags[:10]}
+
+Suggested Orders:
+  AR (p): {self.suggested_ar_order}
+  MA (q): {self.suggested_ma_order}
+"""
+
+
+def arima(
+    y: Union[pd.Series, np.ndarray],
+    order: Optional[Tuple[int, int, int]] = None,
+    seasonal_order: Optional[Tuple[int, int, int, int]] = None,
+    auto_select: bool = True,
+    max_p: int = 5,
+    max_d: int = 2,
+    max_q: int = 5,
+    forecast_steps: int = 0,
+    verbose: bool = False
+) -> ARIMAResults:
+    """
+    Fit ARIMA model with optional automatic order selection.
+    
+    Parameters
+    ----------
+    y : array-like
+        Time series data
+    order : tuple, optional
+        (p, d, q) order
+    seasonal_order : tuple, optional
+        (P, D, Q, s) seasonal order
+    auto_select : bool, default=True
+        Automatically select optimal order
+    max_p, max_d, max_q : int
+        Maximum orders for auto selection
+    forecast_steps : int, default=0
+        Number of steps to forecast
+    verbose : bool
+        Print progress
+        
+    Returns
+    -------
+    ARIMAResults
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels required")
+    
+    from statsmodels.tsa.arima.model import ARIMA
+    from statsmodels.tsa.stattools import adfuller
+    from statsmodels.stats.diagnostic import acorr_ljungbox
+    
+    y = np.asarray(y).flatten()
+    y = y[~np.isnan(y)]
+    
+    if order is None and auto_select:
+        d = 0
+        y_diff = y.copy()
+        for i in range(max_d + 1):
+            try:
+                adf_stat, adf_pval, *_ = adfuller(y_diff, maxlag=int(np.sqrt(len(y_diff))))
+                if adf_pval < 0.05:
+                    d = i
+                    break
+                if i < max_d:
+                    y_diff = np.diff(y_diff)
+            except:
+                break
+        else:
+            d = max_d
+        
+        if verbose:
+            print(f"Selected d = {d}")
+        
+        best_aic = np.inf
+        best_order = (0, d, 0)
+        
+        for p in range(max_p + 1):
+            for q in range(max_q + 1):
+                if p == 0 and q == 0:
+                    continue
+                try:
+                    model = ARIMA(y, order=(p, d, q))
+                    fitted = model.fit()
+                    if fitted.aic < best_aic:
+                        best_aic = fitted.aic
+                        best_order = (p, d, q)
+                        if verbose:
+                            print(f"  ARIMA{(p, d, q)}: AIC = {fitted.aic:.2f}")
+                except:
+                    continue
+        
+        order = best_order
+        if verbose:
+            print(f"Selected order: ARIMA{order}")
+    
+    if seasonal_order is not None:
+        from statsmodels.tsa.statespace.sarimax import SARIMAX
+        model = SARIMAX(y, order=order, seasonal_order=seasonal_order)
+    else:
+        model = ARIMA(y, order=order)
+    
+    fitted = model.fit()
+    
+    try:
+        coefficients = dict(zip(fitted.params.index, fitted.params.values))
+    except:
+        coefficients = {f'param_{i}': v for i, v in enumerate(fitted.params)}
+    
+    residuals = fitted.resid
+    try:
+        lb_result = acorr_ljungbox(residuals, lags=[10], return_df=True)
+        lb_pval = float(lb_result['lb_pvalue'].iloc[0])
+    except:
+        lb_pval = np.nan
+    
+    diagnostics = {
+        'ljung_box_pvalue': lb_pval,
+    }
+    
+    forecast = None
+    forecast_ci = None
+    if forecast_steps > 0:
+        fc = fitted.get_forecast(steps=forecast_steps)
+        forecast = fc.predicted_mean.values
+        forecast_ci = fc.conf_int().values
+    
+    return ARIMAResults(
+        order=order,
+        seasonal_order=seasonal_order,
+        model=fitted,
+        aic=float(fitted.aic),
+        bic=float(fitted.bic),
+        coefficients=coefficients,
+        residuals=residuals,
+        fitted_values=fitted.fittedvalues,
+        forecast=forecast,
+        forecast_ci=forecast_ci,
+        diagnostics=diagnostics
+    )
+
+
+def exponential_smoothing(
+    y: Union[pd.Series, np.ndarray],
+    method: str = 'auto',
+    seasonal_periods: Optional[int] = None,
+    damped: bool = False,
+    forecast_steps: int = 0
+) -> ExponentialSmoothingResults:
+    """
+    Fit exponential smoothing model.
+    
+    Parameters
+    ----------
+    y : array-like
+        Time series data
+    method : str, default='auto'
+        'simple', 'holt', 'holt-winters', or 'auto'
+    seasonal_periods : int, optional
+        Number of periods in seasonal cycle
+    damped : bool, default=False
+        Use damped trend
+    forecast_steps : int, default=0
+        Number of steps to forecast
+        
+    Returns
+    -------
+    ExponentialSmoothingResults
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels required")
+    
+    from statsmodels.tsa.holtwinters import ExponentialSmoothing as HW
+    from statsmodels.tsa.holtwinters import SimpleExpSmoothing
+    
+    y = np.asarray(y).flatten()
+    y = y[~np.isnan(y)]
+    
+    if method == 'auto':
+        candidates = []
+        
+        try:
+            m = SimpleExpSmoothing(y).fit()
+            candidates.append(('simple', m, m.aic))
+        except:
+            pass
+        
+        try:
+            m = HW(y, trend='add', damped_trend=damped).fit()
+            candidates.append(('holt', m, m.aic))
+        except:
+            pass
+        
+        if seasonal_periods is not None and seasonal_periods > 1:
+            try:
+                m = HW(y, trend='add', seasonal='add', seasonal_periods=seasonal_periods, 
+                       damped_trend=damped).fit()
+                candidates.append(('holt-winters', m, m.aic))
+            except:
+                pass
+        
+        if not candidates:
+            raise ValueError("Could not fit any model")
+        
+        best = min(candidates, key=lambda x: x[2])
+        method, fitted, _ = best
+    else:
+        if method == 'simple':
+            fitted = SimpleExpSmoothing(y).fit()
+        elif method in ['holt', 'double']:
+            fitted = HW(y, trend='add', damped_trend=damped).fit()
+            method = 'holt'
+        elif method in ['holt-winters', 'triple']:
+            if seasonal_periods is None:
+                raise ValueError("seasonal_periods required for Holt-Winters")
+            fitted = HW(y, trend='add', seasonal='add', seasonal_periods=seasonal_periods,
+                       damped_trend=damped).fit()
+            method = 'holt-winters'
+        else:
+            raise ValueError(f"Unknown method: {method}")
+    
+    alpha = getattr(fitted, 'params', {}).get('smoothing_level', 
+                   getattr(fitted, 'smoothing_level', np.nan))
+    beta = getattr(fitted, 'params', {}).get('smoothing_trend',
+                  getattr(fitted, 'smoothing_trend', None))
+    gamma = getattr(fitted, 'params', {}).get('smoothing_seasonal',
+                   getattr(fitted, 'smoothing_seasonal', None))
+    
+    forecast = None
+    forecast_ci = None
+    if forecast_steps > 0:
+        forecast = fitted.forecast(steps=forecast_steps)
+        residual_std = np.std(fitted.resid)
+        forecast_ci = np.column_stack([
+            forecast - 1.96 * residual_std * np.sqrt(np.arange(1, forecast_steps + 1)),
+            forecast + 1.96 * residual_std * np.sqrt(np.arange(1, forecast_steps + 1))
+        ])
+    
+    return ExponentialSmoothingResults(
+        method=method,
+        alpha=alpha if alpha is not None else np.nan,
+        beta=beta,
+        gamma=gamma,
+        seasonal_periods=seasonal_periods,
+        model=fitted,
+        aic=float(fitted.aic),
+        fitted_values=fitted.fittedvalues,
+        residuals=fitted.resid,
+        forecast=forecast,
+        forecast_ci=forecast_ci
+    )
+
+
+def autocorrelation_analysis(
+    y: Union[pd.Series, np.ndarray],
+    n_lags: int = 40,
+    alpha: float = 0.05
+) -> AutocorrelationResults:
+    """
+    Compute ACF and PACF with significance testing.
+    
+    Parameters
+    ----------
+    y : array-like
+        Time series data
+    n_lags : int, default=40
+        Number of lags
+    alpha : float, default=0.05
+        Significance level
+        
+    Returns
+    -------
+    AutocorrelationResults
+    """
+    from statsmodels.tsa.stattools import acf, pacf
+    
+    y = np.asarray(y).flatten()
+    y = y[~np.isnan(y)]
+    
+    n = len(y)
+    n_lags = min(n_lags, n // 2 - 1)
+    
+    acf_vals, acf_ci = acf(y, nlags=n_lags, alpha=alpha, fft=True)
+    pacf_vals, pacf_ci = pacf(y, nlags=n_lags, alpha=alpha)
+    
+    threshold = norm.ppf(1 - alpha / 2) / np.sqrt(n)
+    
+    sig_acf = [i for i in range(1, len(acf_vals)) if abs(acf_vals[i]) > threshold]
+    sig_pacf = [i for i in range(1, len(pacf_vals)) if abs(pacf_vals[i]) > threshold]
+    
+    suggested_ar = max(sig_pacf) if sig_pacf else 0
+    
+    suggested_ma = 0
+    for i, sig in enumerate(sig_acf):
+        if i == 0 or sig == sig_acf[i-1] + 1:
+            suggested_ma = sig
+        else:
+            break
+    
+    return AutocorrelationResults(
+        acf_values=acf_vals,
+        pacf_values=pacf_vals,
+        acf_conf_int=acf_ci,
+        pacf_conf_int=pacf_ci,
+        n_lags=n_lags,
+        significant_acf_lags=sig_acf,
+        significant_pacf_lags=sig_pacf,
+        suggested_ar_order=min(suggested_ar, 5),
+        suggested_ma_order=min(suggested_ma, 5)
+    )
+
+
+def seasonal_decomposition(
+    y: Union[pd.Series, np.ndarray],
+    period: int,
+    method: str = 'additive'
+) -> TimeSeriesDecomposition:
+    """
+    Decompose time series into trend, seasonal, and residual.
+    
+    Parameters
+    ----------
+    y : array-like
+        Time series data
+    period : int
+        Seasonal period
+    method : str, default='additive'
+        'additive' or 'multiplicative'
+        
+    Returns
+    -------
+    TimeSeriesDecomposition
+    """
+    from statsmodels.tsa.seasonal import seasonal_decompose
+    
+    y = np.asarray(y).flatten()
+    
+    result = seasonal_decompose(y, model=method, period=period)
+    
+    return TimeSeriesDecomposition(
+        observed=result.observed,
+        trend=result.trend,
+        seasonal=result.seasonal,
+        residual=result.resid,
+        period=period,
+        method=method
+    )
+
+
+def time_series_forecast(
+    y: Union[pd.Series, np.ndarray],
+    steps: int = 10,
+    method: str = 'auto',
+    seasonal_periods: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Unified forecasting interface.
+    
+    Parameters
+    ----------
+    y : array-like
+        Time series data
+    steps : int, default=10
+        Forecast horizon
+    method : str, default='auto'
+        'arima', 'ets', or 'auto'
+    seasonal_periods : int, optional
+        Seasonal period
+        
+    Returns
+    -------
+    dict
+        Forecasts and confidence intervals
+    """
+    y = np.asarray(y).flatten()
+    y = y[~np.isnan(y)]
+    
+    if method == 'auto':
+        try:
+            arima_result = arima(y, auto_select=True, forecast_steps=steps)
+            arima_aic = arima_result.aic
+        except:
+            arima_aic = np.inf
+            arima_result = None
+        
+        try:
+            ets_result = exponential_smoothing(y, method='auto', 
+                                               seasonal_periods=seasonal_periods,
+                                               forecast_steps=steps)
+            ets_aic = ets_result.aic
+        except:
+            ets_aic = np.inf
+            ets_result = None
+        
+        if arima_aic <= ets_aic and arima_result is not None:
+            return {
+                'method': f'ARIMA{arima_result.order}',
+                'forecast': arima_result.forecast,
+                'conf_int': arima_result.forecast_ci,
+                'aic': arima_aic,
+                'model': arima_result
+            }
+        elif ets_result is not None:
+            return {
+                'method': f'ETS ({ets_result.method})',
+                'forecast': ets_result.forecast,
+                'conf_int': ets_result.forecast_ci,
+                'aic': ets_aic,
+                'model': ets_result
+            }
+        else:
+            raise ValueError("Could not fit any model")
+    
+    elif method == 'arima':
+        result = arima(y, auto_select=True, forecast_steps=steps)
+        return {
+            'method': f'ARIMA{result.order}',
+            'forecast': result.forecast,
+            'conf_int': result.forecast_ci,
+            'aic': result.aic,
+            'model': result
+        }
+    
+    else:
+        result = exponential_smoothing(y, method=method if method != 'ets' else 'auto',
+                                       seasonal_periods=seasonal_periods,
+                                       forecast_steps=steps)
+        return {
+            'method': f'ETS ({result.method})',
+            'forecast': result.forecast,
+            'conf_int': result.forecast_ci,
+            'aic': result.aic,
+            'model': result
+        }
+
+
+def plot_time_series_diagnostics(
+    y: Union[pd.Series, np.ndarray],
+    model_results: Optional[Any] = None,
+    n_lags: int = 24,
+    figsize: Tuple[int, int] = (14, 10)
+) -> Optional[Any]:
+    """
+    Create comprehensive time series diagnostic plots.
+    
+    Parameters
+    ----------
+    y : array-like
+        Time series data
+    model_results : optional
+        Fitted model results (ARIMAResults or ExponentialSmoothingResults)
+    n_lags : int, default=24
+        Number of lags for ACF/PACF
+    figsize : tuple
+        Figure size
+        
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    from statsmodels.tsa.stattools import acf, pacf
+    
+    y = np.asarray(y).flatten()
+    y = y[~np.isnan(y)]
+    n = len(y)
+    
+    if model_results is not None:
+        residuals = model_results.residuals
+    else:
+        residuals = y - np.mean(y)
+    
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    
+    # Plot 1: Time Series
+    ax = axes[0, 0]
+    ax.plot(y, 'b-', lw=1, label='Observed')
+    if model_results is not None and hasattr(model_results, 'fitted_values'):
+        ax.plot(model_results.fitted_values, 'r-', lw=1, alpha=0.7, label='Fitted')
+    ax.set_xlabel('Time')
+    ax.set_ylabel('Value')
+    ax.set_title('Time Series')
+    ax.legend()
+    
+    # Plot 2: ACF
+    ax = axes[0, 1]
+    n_lags_plot = min(n_lags, n // 2 - 1)
+    acf_vals = acf(residuals, nlags=n_lags_plot, fft=True)
+    ax.bar(range(len(acf_vals)), acf_vals, color='steelblue', alpha=0.7)
+    conf = 1.96 / np.sqrt(n)
+    ax.axhline(y=conf, color='red', linestyle='--', alpha=0.5)
+    ax.axhline(y=-conf, color='red', linestyle='--', alpha=0.5)
+    ax.axhline(y=0, color='black', lw=0.5)
+    ax.set_xlabel('Lag')
+    ax.set_ylabel('ACF')
+    ax.set_title('Autocorrelation Function (Residuals)')
+    
+    # Plot 3: PACF
+    ax = axes[1, 0]
+    pacf_vals = pacf(residuals, nlags=n_lags_plot)
+    ax.bar(range(len(pacf_vals)), pacf_vals, color='steelblue', alpha=0.7)
+    ax.axhline(y=conf, color='red', linestyle='--', alpha=0.5)
+    ax.axhline(y=-conf, color='red', linestyle='--', alpha=0.5)
+    ax.axhline(y=0, color='black', lw=0.5)
+    ax.set_xlabel('Lag')
+    ax.set_ylabel('PACF')
+    ax.set_title('Partial Autocorrelation Function (Residuals)')
+    
+    # Plot 4: Residual histogram
+    ax = axes[1, 1]
+    ax.hist(residuals, bins=20, density=True, alpha=0.7, color='steelblue', edgecolor='black')
+    x = np.linspace(residuals.min(), residuals.max(), 100)
+    ax.plot(x, norm.pdf(x, np.mean(residuals), np.std(residuals)), 'r-', lw=2, label='Normal')
+    ax.set_xlabel('Residual')
+    ax.set_ylabel('Density')
+    ax.set_title('Residual Distribution')
+    ax.legend()
+    
+    plt.suptitle('Time Series Diagnostics', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    return fig
+
+
+def adf_test(y: Union[pd.Series, np.ndarray], max_lag: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Augmented Dickey-Fuller test for stationarity.
+    
+    Parameters
+    ----------
+    y : array-like
+        Time series data
+    max_lag : int, optional
+        Maximum lag for test
+        
+    Returns
+    -------
+    dict
+        Test statistic, p-value, and conclusion
+    """
+    from statsmodels.tsa.stattools import adfuller
+    
+    y = np.asarray(y).flatten()
+    y = y[~np.isnan(y)]
+    
+    if max_lag is None:
+        max_lag = int(np.sqrt(len(y)))
+    
+    result = adfuller(y, maxlag=max_lag)
+    
+    return {
+        'test_statistic': result[0],
+        'p_value': result[1],
+        'lags_used': result[2],
+        'n_obs': result[3],
+        'critical_values': result[4],
+        'stationary': result[1] < 0.05,
+        'conclusion': 'Stationary' if result[1] < 0.05 else 'Non-stationary'
+    }
+
+
+def kpss_test(y: Union[pd.Series, np.ndarray], regression: str = 'c') -> Dict[str, Any]:
+    """
+    KPSS test for stationarity.
+    
+    Parameters
+    ----------
+    y : array-like
+        Time series data
+    regression : str, default='c'
+        'c' for constant, 'ct' for constant and trend
+        
+    Returns
+    -------
+    dict
+        Test statistic, p-value, and conclusion
+    """
+    from statsmodels.tsa.stattools import kpss
+    
+    y = np.asarray(y).flatten()
+    y = y[~np.isnan(y)]
+    
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = kpss(y, regression=regression)
+    
+    return {
+        'test_statistic': result[0],
+        'p_value': result[1],
+        'lags_used': result[2],
+        'critical_values': result[3],
+        'stationary': result[1] > 0.05,
+        'conclusion': 'Stationary' if result[1] > 0.05 else 'Non-stationary'
+    }
+
+
+def ljung_box_test(y: Union[pd.Series, np.ndarray], lags: int = 10) -> Dict[str, Any]:
+    """
+    Ljung-Box test for autocorrelation.
+    
+    Parameters
+    ----------
+    y : array-like
+        Time series (or residuals)
+    lags : int, default=10
+        Number of lags
+        
+    Returns
+    -------
+    dict
+        Test statistic, p-value, and conclusion
+    """
+    from statsmodels.stats.diagnostic import acorr_ljungbox
+    
+    y = np.asarray(y).flatten()
+    y = y[~np.isnan(y)]
+    
+    result = acorr_ljungbox(y, lags=[lags], return_df=True)
+    
+    return {
+        'test_statistic': float(result['lb_stat'].iloc[0]),
+        'p_value': float(result['lb_pvalue'].iloc[0]),
+        'lags': lags,
+        'no_autocorrelation': float(result['lb_pvalue'].iloc[0]) > 0.05,
+        'conclusion': 'No significant autocorrelation' if float(result['lb_pvalue'].iloc[0]) > 0.05 
+                      else 'Significant autocorrelation detected'
+    }
+
+
+def plot_acf_pacf(
+    y: Union[pd.Series, np.ndarray],
+    n_lags: int = 24,
+    alpha: float = 0.05,
+    figsize: Tuple[int, int] = (12, 5)
+) -> Optional[Any]:
+    """
+    Plot ACF and PACF side by side.
+    
+    Parameters
+    ----------
+    y : array-like
+        Time series data
+    n_lags : int, default=24
+        Number of lags
+    alpha : float, default=0.05
+        Significance level
+    figsize : tuple
+        Figure size
+        
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    from statsmodels.tsa.stattools import acf, pacf
+    
+    y = np.asarray(y).flatten()
+    y = y[~np.isnan(y)]
+    n = len(y)
+    n_lags = min(n_lags, n // 2 - 1)
+    
+    acf_vals = acf(y, nlags=n_lags, fft=True)
+    pacf_vals = pacf(y, nlags=n_lags)
+    
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    
+    conf = norm.ppf(1 - alpha / 2) / np.sqrt(n)
+    
+    ax = axes[0]
+    ax.bar(range(len(acf_vals)), acf_vals, color='steelblue', alpha=0.7)
+    ax.axhline(y=conf, color='red', linestyle='--', alpha=0.5, label=f'{int((1-alpha)*100)}% CI')
+    ax.axhline(y=-conf, color='red', linestyle='--', alpha=0.5)
+    ax.axhline(y=0, color='black', lw=0.5)
+    ax.set_xlabel('Lag')
+    ax.set_ylabel('ACF')
+    ax.set_title('Autocorrelation Function')
+    ax.legend()
+    
+    ax = axes[1]
+    ax.bar(range(len(pacf_vals)), pacf_vals, color='steelblue', alpha=0.7)
+    ax.axhline(y=conf, color='red', linestyle='--', alpha=0.5, label=f'{int((1-alpha)*100)}% CI')
+    ax.axhline(y=-conf, color='red', linestyle='--', alpha=0.5)
+    ax.axhline(y=0, color='black', lw=0.5)
+    ax.set_xlabel('Lag')
+    ax.set_ylabel('PACF')
+    ax.set_title('Partial Autocorrelation Function')
+    ax.legend()
+    
+    plt.tight_layout()
+    return fig
+
+
+# =============================================================================
 # MODULE EXPORTS
 # =============================================================================
 
-__version__ = "1.3.0"
+__version__ = "2.0.0"
 __all__ = [
     # Data classes
     'DescriptiveStats', 'NormalityTest', 'RegressionResults', 'ResidualDiagnostics',
@@ -3683,6 +5921,11 @@ __all__ = [
     'HatMatrixResults', 'SubsetRegressionResults', 'StepwiseResults',
     'CovariateCombinations',
     'TrainTestSplit', 'ModelValidationResults', 'ModelComparisonResults',
+    
+    # NEW v2.0 Data classes
+    'PredictionProfiler', 'ARIMAResults', 'ExponentialSmoothingResults',
+    'TimeSeriesDecomposition', 'AutocorrelationResults',
+    'FactorialDesignResults', 'EffectScreeningResults', 'ResponseSurfaceResults',
     
     # Data import
     'read_csv', 'read_excel',
@@ -3703,8 +5946,8 @@ __all__ = [
     # Covariate combinations / feature engineering
     'covariate_combinations', 'full_factorial_design', 'polynomial_features',
     
-    # Train/test validation
-    'train_test_split', 'validate_model', 'compare_models', 
+    # Train/test validation (JMP-style)
+    'train_test_split', 'make_validation_column', 'validate_model', 'compare_models', 
     'compare_all_criteria', 'plot_train_test_comparison', 'plot_model_comparison',
     
     # Convenience functions
@@ -3713,6 +5956,23 @@ __all__ = [
     # Visualization
     'plot_distribution', 'plot_regression_diagnostics', 'plot_scatter_with_regression',
     'plot_correlation_matrix', 'plot_control_chart',
+    
+    # NEW v2.0: Interactive Visualization / Leverage Plots
+    'plot_leverage_interactive', 'plot_influence_dashboard', 'plot_partial_regression',
+    'plot_added_variable', 'plot_component_residual',
+    
+    # NEW v2.0: Prediction Profiler
+    'prediction_profiler', 'plot_prediction_profiler',
+    
+    # NEW v2.0: Design of Experiments (DoE)
+    'fractional_factorial_design', 'response_surface_design', 'optimal_design',
+    'analyze_factorial', 'effect_screening', 'interaction_plot', 'main_effects_plot',
+    'contour_profiler', 'pareto_of_effects',
+    
+    # NEW v2.0: Time Series Analysis
+    'arima', 'exponential_smoothing', 'autocorrelation_analysis',
+    'seasonal_decomposition', 'time_series_forecast', 'plot_time_series_diagnostics',
+    'adf_test', 'kpss_test', 'ljung_box_test', 'plot_acf_pacf',
     
     # Utilities
     'detect_outliers', 'recode', 'log_transform',
