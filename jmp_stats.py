@@ -3512,6 +3512,11 @@ def compare_models(
     """
     Compare multiple models (feature sets) on train/test data.
     
+    NOTE: When determining the "best" model, any model with a name containing
+    "full", "full_model", or "full model" is automatically excluded to prevent
+    selecting an overfit model. The full model is still included in the 
+    comparison table for reference.
+    
     Parameters
     ----------
     y_train : array-like
@@ -3532,6 +3537,8 @@ def compare_models(
     -------
     ModelComparisonResults
         Dataclass with comparison DataFrame and best models.
+        Note: best_model_by_test_rmse and best_model_by_test_r2 will never
+        be a "Full Model" variant.
         
     Example
     -------
@@ -3543,7 +3550,7 @@ def compare_models(
     ... }
     >>> comparison = compare_models(split.y_train, split.X_train,
     ...                             split.y_test, split.X_test, models)
-    >>> print(comparison)
+    >>> print(comparison)  # Best model will be Stepwise or Simple, not Full Model
     """
     results = []
     
@@ -3577,9 +3584,26 @@ def compare_models(
     
     comparison_df = pd.DataFrame(comparison_data)
     
-    # Find best models
-    best_by_rmse = comparison_df.loc[comparison_df['RASE_Valid'].idxmin(), 'Model']
-    best_by_r2 = comparison_df.loc[comparison_df['RSquare_Valid'].idxmax(), 'Model']
+    # Find best models (excluding Full Model variants)
+    # This prevents overfitting by not selecting the model with all predictors
+    full_model_patterns = ['full_model', 'full model', 'fullmodel', 'full']
+    
+    def is_full_model(name):
+        """Check if model name indicates it's a full model."""
+        name_lower = name.lower().replace('_', ' ').replace('-', ' ')
+        return any(pattern in name_lower for pattern in full_model_patterns)
+    
+    # Filter out full models for best model selection
+    non_full_df = comparison_df[~comparison_df['Model'].apply(is_full_model)]
+    
+    if len(non_full_df) > 0:
+        # Select best from non-full models
+        best_by_rmse = non_full_df.loc[non_full_df['RASE_Valid'].idxmin(), 'Model']
+        best_by_r2 = non_full_df.loc[non_full_df['RSquare_Valid'].idxmax(), 'Model']
+    else:
+        # Fallback if only full models exist (shouldn't happen normally)
+        best_by_rmse = comparison_df.loc[comparison_df['RASE_Valid'].idxmin(), 'Model']
+        best_by_r2 = comparison_df.loc[comparison_df['RSquare_Valid'].idxmax(), 'Model']
     
     return ModelComparisonResults(
         model_results=results,
@@ -3595,6 +3619,7 @@ def compare_all_criteria(
     test_size: float = 0.2,
     random_state: Optional[int] = None,
     direction: str = 'both',
+    include_full_model: bool = True,
     verbose: bool = True
 ) -> ModelComparisonResults:
     """
@@ -3605,6 +3630,10 @@ def compare_all_criteria(
     2. Runs stepwise with each criterion on training data
     3. Evaluates all models on test data
     4. Returns comparison
+    
+    NOTE: When selecting the "best" model, the Full Model is automatically
+    excluded to prevent overfitting. The Full Model is included in the
+    comparison table for reference but will never be selected as best.
     
     Parameters
     ----------
@@ -3618,6 +3647,9 @@ def compare_all_criteria(
         Random seed for reproducibility.
     direction : str, default='both'
         Stepwise direction: 'forward', 'backward', or 'both'.
+    include_full_model : bool, default=True
+        Whether to include the full model in comparison table.
+        Even if True, full model will not be selected as "best".
     verbose : bool, default=True
         Print progress.
         
@@ -3663,11 +3695,14 @@ def compare_all_criteria(
             if verbose:
                 print(f"error: {e}")
     
-    # Add full model for comparison
-    feature_sets['Full_Model'] = list(X.columns)
+    # Add full model for comparison (but it won't be selected as best)
+    if include_full_model:
+        feature_sets['Full_Model'] = list(X.columns)
     
     if verbose:
         print("\nEvaluating models on test data...")
+        if include_full_model:
+            print("(Note: Full Model included for reference but excluded from 'best' selection)")
     
     return compare_models(
         split.y_train, split.X_train,
