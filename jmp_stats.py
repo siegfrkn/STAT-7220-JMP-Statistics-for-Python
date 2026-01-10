@@ -9,6 +9,13 @@ matplotlib/seaborn for visualization.
 Installation Requirements:
     pip install numpy pandas scipy statsmodels matplotlib seaborn
 
+NEW IN v2.1:
+    - CATEGORICAL VARIABLE ENCODING:
+        - encode_categorical(): Create dummy variables for regression
+        - encode_effect(): Effect coding (-1, 0, 1) like JMP's default
+        - get_categorical_columns(): Identify categorical vs numeric columns
+        - EncodedDataFrame class with encoding metadata and helper methods
+
 NEW IN v2.0:
     - INTERACTIVE VISUALIZATIONS:
         - plot_leverage_interactive(): JMP-style interactive leverage plots
@@ -1842,6 +1849,453 @@ def read_excel(filepath: str,
         print(f"{'='*60}\n")
     
     return df
+
+
+# =============================================================================
+# CATEGORICAL VARIABLE ENCODING
+# =============================================================================
+
+@dataclass
+class EncodedDataFrame:
+    """Container for encoded categorical variable results."""
+    data: pd.DataFrame  # The encoded DataFrame
+    encoding_info: Dict[str, Dict[str, Any]]  # Info about each encoded column
+    original_columns: List[str]  # Original column names
+    encoded_columns: List[str]  # All columns after encoding
+    dummy_columns: List[str]  # Just the new dummy columns
+    numeric_columns: List[str]  # Columns that were already numeric
+    reference_levels: Dict[str, str]  # Reference level for each categorical
+    
+    def __str__(self):
+        cat_info = []
+        for col, info in self.encoding_info.items():
+            cat_info.append(f"  {col}: {info['n_levels']} levels -> {info['n_dummies']} dummies (ref: '{info['reference']}')")
+        cat_str = '\n'.join(cat_info) if cat_info else '  (none)'
+        
+        return f"""
+Encoded DataFrame Summary
+=========================
+Original columns:     {len(self.original_columns)}
+Encoded columns:      {len(self.encoded_columns)}
+Numeric (unchanged):  {len(self.numeric_columns)}
+Dummy columns added:  {len(self.dummy_columns)}
+
+Categorical Encodings:
+{cat_str}
+
+Use .data to access the encoded DataFrame.
+Use .get_dummies_for(col) to get dummy column names for a specific variable.
+"""
+    
+    def get_dummies_for(self, column: str) -> List[str]:
+        """Get the dummy column names for a specific categorical variable."""
+        if column in self.encoding_info:
+            return self.encoding_info[column]['dummy_columns']
+        return []
+    
+    def get_groups(self) -> Dict[str, List[str]]:
+        """Get all categorical variable groups (for grouped stepwise selection)."""
+        return {col: info['dummy_columns'] for col, info in self.encoding_info.items()}
+
+
+def encode_categorical(
+    df: pd.DataFrame,
+    columns: Optional[List[str]] = None,
+    drop_first: bool = True,
+    reference_levels: Optional[Dict[str, str]] = None,
+    prefix_sep: str = '_',
+    dummy_na: bool = False,
+    dtype: type = float,
+    verbose: bool = True
+) -> EncodedDataFrame:
+    """
+    Encode categorical variables as dummy variables for regression analysis.
+    
+    Creates dummy/indicator variables from categorical columns, suitable for
+    use in linear regression, stepwise regression, and other modeling functions.
+    This follows JMP's approach to handling categorical predictors.
+    
+    Parameters
+    ----------
+    df : DataFrame
+        Input DataFrame containing categorical and/or numeric columns
+    columns : list of str, optional
+        Specific columns to encode. If None, automatically detects and encodes
+        all object and category dtype columns.
+    drop_first : bool, default True
+        Whether to drop the first (reference) level to avoid multicollinearity.
+        Set to False for full dummy encoding (useful for some applications).
+    reference_levels : dict, optional
+        Specify reference level for specific columns.
+        Example: {'Color': 'Red', 'Size': 'Small'}
+        Columns not in this dict use the first level alphabetically.
+    prefix_sep : str, default '_'
+        Separator between column name and level name in dummy column names.
+        Example: 'Color_Blue', 'Color_Green'
+    dummy_na : bool, default False
+        Add a dummy column for missing values. If False, rows with NA in
+        categorical columns will have 0 in all dummy columns for that variable.
+    dtype : type, default float
+        Data type for dummy columns (float or int)
+    verbose : bool, default True
+        Print summary of encoding
+        
+    Returns
+    -------
+    EncodedDataFrame
+        Object containing:
+        - data: The encoded DataFrame
+        - encoding_info: Details about each encoded column
+        - Methods for accessing dummy column groups
+        
+    Examples
+    --------
+    >>> # Basic usage - auto-detect categorical columns
+    >>> encoded = encode_categorical(df)
+    >>> print(encoded)  # See summary
+    >>> encoded.data  # Access the encoded DataFrame
+    
+    >>> # Specify which columns to encode
+    >>> encoded = encode_categorical(df, columns=['Color', 'Size'])
+    
+    >>> # Set specific reference levels
+    >>> encoded = encode_categorical(df, reference_levels={'Color': 'Red'})
+    
+    >>> # Use with stepwise regression
+    >>> encoded = encode_categorical(df[predictors])
+    >>> results = stepwise_regression_enhanced(df['y'], encoded.data)
+    
+    >>> # Get dummy columns for a specific variable (for grouped selection)
+    >>> color_dummies = encoded.get_dummies_for('Color')
+    
+    Notes
+    -----
+    - JMP uses effect coding by default, but dummy (indicator) coding is more
+      common in Python. This function uses dummy coding.
+    - For effect coding, you would need to manually recode (-1, 0, 1 scheme).
+    - The reference level (dropped category) represents the baseline.
+    - Coefficients for dummy variables represent the difference from the reference.
+    
+    See Also
+    --------
+    stepwise_regression_enhanced : Stepwise regression that can use encoded data
+    linear_regression : Linear regression with encoded predictors
+    """
+    df = df.copy()
+    
+    # Identify columns to encode
+    if columns is None:
+        # Auto-detect categorical columns
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    else:
+        categorical_cols = [c for c in columns if c in df.columns]
+    
+    # Identify numeric columns (pass through unchanged)
+    numeric_cols = [c for c in df.columns if c not in categorical_cols]
+    
+    if not categorical_cols:
+        if verbose:
+            print("No categorical columns to encode.")
+        return EncodedDataFrame(
+            data=df,
+            encoding_info={},
+            original_columns=list(df.columns),
+            encoded_columns=list(df.columns),
+            dummy_columns=[],
+            numeric_columns=list(df.columns),
+            reference_levels={}
+        )
+    
+    reference_levels = reference_levels or {}
+    encoding_info = {}
+    all_dummy_cols = []
+    final_ref_levels = {}
+    
+    # Start with numeric columns
+    result_df = df[numeric_cols].copy()
+    
+    # Process each categorical column
+    for col in categorical_cols:
+        # Get unique levels (excluding NaN unless dummy_na)
+        levels = df[col].dropna().unique()
+        levels = sorted([str(l) for l in levels])  # Sort alphabetically
+        
+        # Determine reference level
+        if col in reference_levels:
+            ref_level = str(reference_levels[col])
+            if ref_level not in levels:
+                warnings.warn(f"Reference level '{ref_level}' not found in column '{col}'. "
+                            f"Using first level '{levels[0]}' instead.")
+                ref_level = levels[0]
+        else:
+            ref_level = levels[0]  # First alphabetically
+        
+        final_ref_levels[col] = ref_level
+        
+        # Reorder levels so reference is first (will be dropped)
+        levels_ordered = [ref_level] + [l for l in levels if l != ref_level]
+        
+        # Convert column to categorical with ordered levels
+        df[col] = pd.Categorical(df[col].astype(str).replace('nan', np.nan), 
+                                  categories=levels_ordered)
+        
+        # Create dummies
+        dummies = pd.get_dummies(
+            df[col], 
+            prefix=col, 
+            prefix_sep=prefix_sep,
+            drop_first=drop_first,
+            dummy_na=dummy_na,
+            dtype=dtype
+        )
+        
+        dummy_col_names = list(dummies.columns)
+        all_dummy_cols.extend(dummy_col_names)
+        
+        # Store encoding info
+        encoding_info[col] = {
+            'levels': levels_ordered,
+            'n_levels': len(levels_ordered),
+            'reference': ref_level,
+            'drop_first': drop_first,
+            'dummy_columns': dummy_col_names,
+            'n_dummies': len(dummy_col_names)
+        }
+        
+        # Add dummies to result
+        result_df = pd.concat([result_df, dummies], axis=1)
+    
+    if verbose:
+        print(f"\n{'='*60}")
+        print("Categorical Encoding Summary")
+        print(f"{'='*60}")
+        print(f"Original columns: {len(df.columns)}")
+        print(f"Categorical columns encoded: {len(categorical_cols)}")
+        print(f"Numeric columns (unchanged): {len(numeric_cols)}")
+        print(f"Total columns after encoding: {len(result_df.columns)}")
+        print(f"\nEncoding Details:")
+        for col, info in encoding_info.items():
+            print(f"  {col}:")
+            print(f"    Levels: {info['levels']}")
+            print(f"    Reference (dropped): '{info['reference']}'")
+            print(f"    Dummy columns: {info['dummy_columns']}")
+        print(f"{'='*60}\n")
+    
+    return EncodedDataFrame(
+        data=result_df,
+        encoding_info=encoding_info,
+        original_columns=list(df.columns),
+        encoded_columns=list(result_df.columns),
+        dummy_columns=all_dummy_cols,
+        numeric_columns=numeric_cols,
+        reference_levels=final_ref_levels
+    )
+
+
+def encode_effect(
+    df: pd.DataFrame,
+    columns: Optional[List[str]] = None,
+    reference_levels: Optional[Dict[str, str]] = None,
+    prefix_sep: str = '_',
+    verbose: bool = True
+) -> EncodedDataFrame:
+    """
+    Encode categorical variables using effect coding (JMP's default).
+    
+    This is JMP's default parameterization for categorical variables in Fit Model.
+    Effect coding uses -1, 0, 1 values where:
+    - Each non-reference level gets 1 in its column, 0 in others
+    - The reference (last) level gets -1 in ALL columns
+    
+    This coding centers effects around the grand mean, making coefficients
+    represent deviations from the overall average rather than differences
+    from a baseline group.
+    
+    Parameters
+    ----------
+    df : DataFrame
+        Input DataFrame containing categorical columns
+    columns : list of str, optional
+        Specific columns to encode. If None, auto-detects categorical columns.
+    reference_levels : dict, optional
+        Specify reference level for specific columns. By default, the last
+        level (alphabetically) is used as reference, matching JMP's behavior.
+    prefix_sep : str, default '_'
+        Separator between column name and level name
+    verbose : bool, default True
+        Print summary
+        
+    Returns
+    -------
+    EncodedDataFrame
+        Object containing the effect-coded DataFrame and encoding information
+        
+    Notes
+    -----
+    JMP Effect Coding Example (3-level factor: A, B, C):
+        Level A: (1, 0)   - coded as 1 in first column, 0 in second
+        Level B: (0, 1)   - coded as 0 in first column, 1 in second
+        Level C: (-1, -1) - reference level, coded as -1 in ALL columns
+    
+    Coefficient Interpretation:
+    - Coefficients represent deviation from the grand mean
+    - Sum of effects across all levels = 0
+    - Reference level effect = -(sum of other level effects)
+    - Intercept represents the grand mean (not reference group mean)
+    
+    Compare to dummy/indicator coding (encode_categorical with drop_first=True):
+    - Coefficients represent difference from reference level
+    - Reference level is the baseline (coded as 0 in all columns)
+    - Intercept represents the reference group mean
+    
+    When to use effect coding (JMP default):
+    - ANOVA-style analysis where you want effects relative to grand mean
+    - Balanced experimental designs
+    - When you want coefficients to sum to zero
+    
+    When to use dummy coding:
+    - When you have a meaningful reference/control group
+    - When you want to interpret coefficients as differences from baseline
+    - More common in epidemiology, social sciences
+    
+    Examples
+    --------
+    >>> # JMP-style effect coding for ANOVA
+    >>> encoded = encode_effect(df, columns=['Treatment'])
+    >>> results = linear_regression(df['y'], encoded.data)
+    
+    >>> # Specify which level should be the reference
+    >>> encoded = encode_effect(df, reference_levels={'Treatment': 'Control'})
+    
+    See Also
+    --------
+    encode_categorical : Dummy/indicator coding (0, 1)
+    encode_jmp : Alias for encode_effect (JMP's default coding)
+    """
+    df = df.copy()
+    
+    # Identify columns to encode
+    if columns is None:
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    else:
+        categorical_cols = [c for c in columns if c in df.columns]
+    
+    numeric_cols = [c for c in df.columns if c not in categorical_cols]
+    
+    if not categorical_cols:
+        if verbose:
+            print("No categorical columns to encode.")
+        return EncodedDataFrame(
+            data=df,
+            encoding_info={},
+            original_columns=list(df.columns),
+            encoded_columns=list(df.columns),
+            dummy_columns=[],
+            numeric_columns=list(df.columns),
+            reference_levels={}
+        )
+    
+    reference_levels = reference_levels or {}
+    encoding_info = {}
+    all_effect_cols = []
+    final_ref_levels = {}
+    
+    result_df = df[numeric_cols].copy()
+    
+    for col in categorical_cols:
+        levels = sorted(df[col].dropna().unique().astype(str).tolist())
+        
+        if col in reference_levels:
+            ref_level = str(reference_levels[col])
+            if ref_level not in levels:
+                ref_level = levels[-1]  # Last level as reference for effect coding
+        else:
+            ref_level = levels[-1]  # Last level as reference (common convention)
+        
+        final_ref_levels[col] = ref_level
+        non_ref_levels = [l for l in levels if l != ref_level]
+        
+        effect_col_names = []
+        for level in non_ref_levels:
+            effect_col = f"{col}{prefix_sep}{level}"
+            effect_col_names.append(effect_col)
+            
+            # Create effect coded column
+            result_df[effect_col] = df[col].apply(
+                lambda x: 1.0 if str(x) == level else (-1.0 if str(x) == ref_level else 0.0)
+            )
+        
+        all_effect_cols.extend(effect_col_names)
+        
+        encoding_info[col] = {
+            'levels': levels,
+            'n_levels': len(levels),
+            'reference': ref_level,
+            'coding': 'effect',
+            'dummy_columns': effect_col_names,
+            'n_dummies': len(effect_col_names)
+        }
+    
+    if verbose:
+        print(f"\n{'='*60}")
+        print("Effect Coding Summary")
+        print(f"{'='*60}")
+        print(f"Categorical columns encoded: {len(categorical_cols)}")
+        print(f"Total columns after encoding: {len(result_df.columns)}")
+        print(f"\nEncoding Details (Effect Coding: -1, 0, 1):")
+        for col, info in encoding_info.items():
+            print(f"  {col}:")
+            print(f"    Levels: {info['levels']}")
+            print(f"    Reference (coded as -1): '{info['reference']}'")
+            print(f"    Effect columns: {info['dummy_columns']}")
+        print(f"{'='*60}\n")
+    
+    return EncodedDataFrame(
+        data=result_df,
+        encoding_info=encoding_info,
+        original_columns=list(df.columns),
+        encoded_columns=list(result_df.columns),
+        dummy_columns=all_effect_cols,
+        numeric_columns=numeric_cols,
+        reference_levels=final_ref_levels
+    )
+
+
+def get_categorical_columns(df: pd.DataFrame) -> Dict[str, List[str]]:
+    """
+    Identify categorical vs numeric columns in a DataFrame.
+    
+    Parameters
+    ----------
+    df : DataFrame
+        Input DataFrame
+        
+    Returns
+    -------
+    dict
+        Dictionary with keys 'categorical' and 'numeric', each containing
+        a list of column names
+        
+    Examples
+    --------
+    >>> col_types = get_categorical_columns(df)
+    >>> print(f"Categorical: {col_types['categorical']}")
+    >>> print(f"Numeric: {col_types['numeric']}")
+    """
+    categorical = df.select_dtypes(include=['object', 'category']).columns.tolist()
+    numeric = df.select_dtypes(include=[np.number]).columns.tolist()
+    other = [c for c in df.columns if c not in categorical and c not in numeric]
+    
+    return {
+        'categorical': categorical,
+        'numeric': numeric,
+        'other': other
+    }
+
+
+# Alias for JMP's default categorical encoding
+encode_jmp = encode_effect
+"""Alias for encode_effect() - JMP's default categorical variable parameterization."""
 
 
 # =============================================================================
