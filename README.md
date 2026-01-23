@@ -1,11 +1,11 @@
 # JMP-Stats: JMP-Style Statistical Analysis for Python
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Version 2.0.0](https://img.shields.io/badge/version-2.0.0-green.svg)](https://github.com/yourusername/jmp-stats)
+[![Version 2.2.0](https://img.shields.io/badge/version-2.2.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
 
 A comprehensive Python library that replicates JMP's statistical analysis capabilities for predictive analytics. Designed for students and practitioners who want to perform the same analyses in Python that they would do in JMP.
 
-**Perfect for:** STAT 7220 - Predictive Analytics and similar courses.
+**Perfect for:** STAT 7220 - Predictive Analytics, STAT 7320, and similar courses.
 
 ---
 
@@ -17,6 +17,7 @@ A comprehensive Python library that replicates JMP's statistical analysis capabi
   - [Data Import](#data-import)
   - [Descriptive Statistics](#descriptive-statistics)
   - [Linear Regression](#linear-regression)
+  - [Prediction Intervals](#prediction-intervals)
   - [Model Selection](#model-selection)
   - [Train/Test Validation](#traintest-validation)
   - [Influence Diagnostics](#influence-diagnostics)
@@ -26,6 +27,7 @@ A comprehensive Python library that replicates JMP's statistical analysis capabi
 - [Function Reference](#function-reference)
 - [Examples](#examples)
 - [Tips & Best Practices](#tips--best-practices)
+- [Future Development](#future-development)
 
 ---
 
@@ -63,6 +65,10 @@ print(stats)
 # Simple linear regression
 results = jmp.linear_regression(df['y'], df[['x1', 'x2', 'x3']])
 print(results)
+
+# Prediction intervals for new observations
+pi = jmp.prediction_interval(df['y'], df[['x1', 'x2']], X_new)
+print(pi.to_dataframe())
 
 # Stepwise regression with BIC
 step = jmp.stepwise_regression_enhanced(df['y'], df[predictors], criterion='bic')
@@ -152,6 +158,36 @@ print(diag)
 
 ---
 
+### Prediction Intervals
+
+Calculate prediction intervals for new observations. Based on ISLP pg 110: "Prediction intervals will always be wider than confidence intervals because they account for the uncertainty associated with epsilon, the irreducible error."
+
+```python
+# Forecast with prediction intervals
+X_new = pd.DataFrame({'x1': [10, 15], 'x2': [5, 8]})
+
+results = jmp.prediction_interval(
+    y=df['y'], 
+    X=df[['x1', 'x2']], 
+    X_new=X_new,
+    alpha=0.05  # 95% intervals
+)
+
+print(results.to_dataframe())
+```
+
+**Output includes:**
+- Point predictions
+- SE for fitted value (confidence interval)
+- SE for prediction (prediction interval)
+- Lower/Upper bounds for both CI and PI
+
+**Key distinction:**
+- **Confidence Interval (CI)**: Where the true mean response is expected to fall
+- **Prediction Interval (PI)**: Where an individual observation is expected to fall (always wider)
+
+---
+
 ### Model Selection
 
 #### Stepwise Regression
@@ -168,6 +204,7 @@ print(f"Selected features: {step.selected_features}")
 ```
 
 **Available stopping criteria:**
+
 | Criterion | Description |
 |-----------|-------------|
 | `'pvalue'` | P-value threshold (add if p < 0.05, remove if p > 0.10) |
@@ -565,6 +602,7 @@ print(f"Forecasts: {forecast['forecast']}")
 | Function | Description |
 |----------|-------------|
 | `linear_regression()` | OLS regression with full output |
+| `prediction_interval()` | Prediction and confidence intervals for new data |
 | `residual_diagnostics()` | Residual analysis and tests |
 | `fit_y_by_x()` | JMP-style bivariate fit |
 | `fit_model()` | Multiple regression with interactions |
@@ -595,6 +633,8 @@ print(f"Forecasts: {forecast['forecast']}")
 |----------|-------------|
 | `covariate_combinations()` | Generate interactions and polynomials |
 | `polynomial_features()` | Sklearn-style polynomial features |
+| `encode_categorical()` | Create dummy variables for regression |
+| `encode_effect()` | Effect coding (-1, 0, 1) like JMP's default |
 
 ### Visualization
 
@@ -691,9 +731,14 @@ jmp.plot_influence_dashboard(df['sales'], df[best_features])
 profiler = jmp.prediction_profiler(df['sales'], df[best_features], y_name='Sales')
 jmp.plot_prediction_profiler(profiler)
 
-# 9. Final model
+# 9. Final model with prediction intervals
 final = jmp.linear_regression(df['sales'], df[best_features])
 print(final)
+
+# 10. Forecast new observations
+X_new = pd.DataFrame({'price': [25], 'advertising': [5000]})
+pi = jmp.prediction_interval(df['sales'], df[best_features], X_new)
+print(pi.to_dataframe())
 ```
 
 ### DOE Analysis Workflow
@@ -731,29 +776,60 @@ jmp.interaction_plot(design, 'Yield', 'Temperature', 'Pressure')
 ## Tips & Best Practices
 
 ### Model Selection
-
 1. **Always use train/test validation** - Don't just rely on training metrics
 2. **Full Model is excluded from "best" selection** - This prevents overfitting
 3. **Compare multiple criteria** - BIC, AIC, and cross-validation often give different answers
-4. **Check for overfitting** - Look for large gaps between train and test R²
+4. **Check for overfitting** - Look for large gaps between train and test R-squared
 
 ### Regression Diagnostics
-
 1. **Check VIF values** - VIF > 10 suggests multicollinearity
 2. **Review influence diagnostics** - Remove or investigate high-leverage points
 3. **Validate assumptions** - Check residual plots for patterns
 
-### Time Series
+### Prediction Intervals
+1. **Use PI for individual predictions** - CI is only for the mean response
+2. **PI is always wider than CI** - It includes irreducible error
+3. **Check calibration first** - Intervals assume model assumptions are met
 
+### Time Series
 1. **Test for stationarity first** - Use `adf_test()` before fitting ARIMA
 2. **Use ACF/PACF** - Let `autocorrelation_analysis()` suggest orders
 3. **Compare methods** - Try both ARIMA and exponential smoothing
 
 ### DOE
-
 1. **Use center points** - They help detect curvature
 2. **Randomize run order** - The `RunOrder` column is provided for this
 3. **Screen first** - Use fractional factorials to identify important factors
+
+---
+
+## Future Development
+
+Priority additions for upcoming versions:
+
+1. **Categorical Variable Handling in Regression**
+   - Formula-style syntax support (e.g., `'y ~ x1 + C(category)'`)
+   - Automatic dummy/effect coding within `linear_regression()`
+   - Reference level selection for categorical predictors
+
+2. **Mixed Effects Models**
+   - `random_effects()`: Support for random intercepts and slopes
+   - `mixed_model()`: Linear mixed effects regression (like JMP's Mixed Model)
+
+3. **Logistic Regression**
+   - `logistic_regression()`: Binary and multinomial logistic regression
+   - ROC curves and AUC calculation
+   - Classification metrics (confusion matrix, precision, recall)
+
+4. **Enhanced Model Selection**
+   - `cross_validation()`: K-fold CV with multiple metrics
+   - `regularized_regression()`: Ridge, Lasso, Elastic Net
+   - `model_averaging()`: Combine predictions from multiple models
+
+5. **Additional Diagnostics**
+   - `vif()`: Variance Inflation Factors for multicollinearity
+   - `partial_regression_plots()`: Added variable plots
+   - `component_residual_plots()`: Partial residual plots
 
 ---
 
@@ -771,6 +847,8 @@ Contributions welcome! Please submit issues and pull requests on GitHub.
 
 ## Version History
 
+- **v2.2.0** - Added prediction intervals (`prediction_interval()`) for forecasting with CI and PI
+- **v2.1.0** - Added categorical variable encoding (`encode_categorical()`, `encode_effect()`)
 - **v2.0.0** - Added leverage plots, prediction profiler, DOE, time series analysis
 - **v1.4.0** - Added train/test validation, model comparison
 - **v1.3.0** - Added covariate combinations, enhanced stepwise
