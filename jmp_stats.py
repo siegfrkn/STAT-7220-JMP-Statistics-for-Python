@@ -9,6 +9,14 @@ matplotlib/seaborn for visualization.
 Installation Requirements:
     pip install numpy pandas scipy statsmodels matplotlib seaborn
 
+NEW IN v2.2:
+    - PREDICTION INTERVALS:
+        - prediction_interval(): Calculate prediction intervals for new observations
+        - Returns both CI (for mean) and PI (for individual predictions)
+        - Based on ISLP pg 110: "Prediction intervals will always be wider than
+          confidence intervals because they account for the uncertainty 
+          associated with ε, the irreducible error."
+
 NEW IN v2.1:
     - CATEGORICAL VARIABLE ENCODING:
         - encode_categorical(): Create dummy variables for regression
@@ -56,6 +64,33 @@ NEW IN v1.1:
     - subset_regression(): All possible subsets with multiple criteria
     - stepwise_regression_enhanced(): Multiple stopping rules and directions
     - compare_stepwise_criteria(): Compare all stopping rules side-by-side
+
+FUTURE DEVELOPMENT (TODO):
+    Priority additions for upcoming versions:
+    
+    1. CATEGORICAL VARIABLE HANDLING IN REGRESSION:
+        - Add formula-style syntax support (e.g., 'y ~ x1 + C(category)')
+        - Automatic dummy/effect coding within linear_regression()
+        - Reference level selection for categorical predictors
+    
+    2. MIXED EFFECTS MODELS:
+        - random_effects(): Support for random intercepts and slopes
+        - mixed_model(): Linear mixed effects regression (like JMP's Mixed Model)
+    
+    3. LOGISTIC REGRESSION:
+        - logistic_regression(): Binary and multinomial logistic regression
+        - ROC curves and AUC calculation
+        - Classification metrics (confusion matrix, precision, recall)
+    
+    4. ENHANCED MODEL SELECTION:
+        - cross_validation(): K-fold CV with multiple metrics
+        - regularized_regression(): Ridge, Lasso, Elastic Net
+        - model_averaging(): Combine predictions from multiple models
+    
+    5. ADDITIONAL DIAGNOSTICS:
+        - vif(): Variance Inflation Factors for multicollinearity
+        - partial_regression_plots(): Added variable plots
+        - component_residual_plots(): Partial residual plots
 
 Usage Examples:
 
@@ -397,6 +432,48 @@ Durbin-Watson        {self.durbin_watson:.6f}
             'anova': pd.DataFrame(anova_data),
             'fit_statistics': pd.DataFrame(fit_data)
         }
+
+
+@dataclass
+class PredictionIntervalResults:
+    """Container for prediction interval results."""
+    y_pred: np.ndarray
+    lower_pi: np.ndarray
+    upper_pi: np.ndarray
+    lower_ci: np.ndarray
+    upper_ci: np.ndarray
+    se_pred: np.ndarray
+    se_fit: np.ndarray
+    alpha: float
+    
+    def __str__(self):
+        n = len(self.y_pred)
+        lines = [
+            "Prediction Interval Results",
+            "=" * 40,
+            f"Alpha: {self.alpha} ({(1-self.alpha)*100:.0f}% intervals)",
+            f"Number of predictions: {n}",
+            "",
+            "Predictions:",
+            f"{'Obs':>5} {'Predicted':>12} {'PI Lower':>12} {'PI Upper':>12} {'CI Lower':>12} {'CI Upper':>12}"
+        ]
+        for i in range(min(n, 10)):
+            lines.append(f"{i+1:>5} {self.y_pred[i]:>12.2f} {self.lower_pi[i]:>12.2f} {self.upper_pi[i]:>12.2f} {self.lower_ci[i]:>12.2f} {self.upper_ci[i]:>12.2f}")
+        if n > 10:
+            lines.append(f"... ({n - 10} more rows)")
+        return "\n".join(lines)
+    
+    def to_dataframe(self) -> pd.DataFrame:
+        """Return results as a DataFrame."""
+        return pd.DataFrame({
+            'Predicted': self.y_pred,
+            'SE_Pred': self.se_pred,
+            'SE_Fit': self.se_fit,
+            'PI_Lower': self.lower_pi,
+            'PI_Upper': self.upper_pi,
+            'CI_Lower': self.lower_ci,
+            'CI_Upper': self.upper_ci
+        })
 
 
 @dataclass 
@@ -881,6 +958,139 @@ def residual_diagnostics(y: Union[pd.Series, np.ndarray],
         homoscedastic=bp_p > alpha,
         residuals_normal=shap_p > alpha,
         independent=1.5 < dw < 2.5
+    )
+
+
+def prediction_interval(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray, pd.Series],
+    X_new: Union[pd.DataFrame, np.ndarray, pd.Series, None] = None,
+    alpha: float = 0.05,
+    add_constant: bool = True
+) -> PredictionIntervalResults:
+    """
+    Calculate prediction intervals for new observations.
+    
+    Returns both confidence intervals (for the mean response) and prediction
+    intervals (for individual observations). Prediction intervals are always
+    wider because they account for irreducible error.
+    
+    Based on ISLP pg 110: "Prediction intervals will always be wider than
+    confidence intervals because they account for the uncertainty associated
+    with epsilon, the irreducible error."
+    
+    Parameters
+    ----------
+    y : array-like
+        Response variable (training data)
+    X : DataFrame or array-like
+        Predictor variables (training data)
+    X_new : DataFrame or array-like, optional
+        New X values for prediction. If None, uses training X.
+    alpha : float, default 0.05
+        Significance level (0.05 = 95% intervals)
+    add_constant : bool, default True
+        Whether to add intercept term
+        
+    Returns
+    -------
+    PredictionIntervalResults
+        Contains y_pred, lower_pi, upper_pi, lower_ci, upper_ci, se_pred, se_fit
+    
+    Example
+    -------
+    >>> results = prediction_interval(y_train, X_train, X_new)
+    >>> print(results.to_dataframe())
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels required. Install: pip install statsmodels")
+    
+    # Convert inputs to numpy arrays
+    y = np.asarray(y).flatten()
+    
+    if isinstance(X, pd.Series):
+        X = X.to_frame()
+    if isinstance(X, pd.DataFrame):
+        X_names = list(X.columns)
+        X_arr = X.values
+    else:
+        X_arr = np.asarray(X)
+        if X_arr.ndim == 1:
+            X_arr = X_arr.reshape(-1, 1)
+        X_names = [f'X{i+1}' for i in range(X_arr.shape[1])]
+    
+    # Handle missing values
+    mask = ~(np.isnan(y) | np.any(np.isnan(X_arr), axis=1))
+    y_clean = y[mask]
+    X_clean = X_arr[mask]
+    
+    # Add constant if requested
+    if add_constant:
+        X_design = sm.add_constant(X_clean)
+    else:
+        X_design = X_clean
+    
+    # Fit the model
+    model = sm.OLS(y_clean, X_design).fit()
+    
+    n = len(y_clean)
+    p = X_design.shape[1]  # number of parameters (including intercept)
+    df_resid = n - p
+    mse = model.mse_resid
+    
+    # Prepare X_new
+    if X_new is None:
+        X_new_arr = X_clean.copy()
+    else:
+        if isinstance(X_new, pd.Series):
+            X_new = X_new.to_frame()
+        if isinstance(X_new, pd.DataFrame):
+            X_new_arr = X_new.values
+        else:
+            X_new_arr = np.asarray(X_new)
+            if X_new_arr.ndim == 1:
+                X_new_arr = X_new_arr.reshape(-1, 1)
+    
+    # Add constant to X_new if needed
+    if add_constant:
+        X_new_design = sm.add_constant(X_new_arr, has_constant='add')
+    else:
+        X_new_design = X_new_arr
+    
+    # Predictions
+    y_pred = model.predict(X_new_design)
+    
+    # Calculate leverage (h) for new observations
+    # h = x_new' (X'X)^-1 x_new
+    XtX_inv = np.linalg.inv(X_design.T @ X_design)
+    h = np.array([x @ XtX_inv @ x.T for x in X_new_design])
+    
+    # Standard errors
+    # SE for fitted value (confidence interval): sqrt(MSE * h)
+    # SE for prediction (prediction interval): sqrt(MSE * (1 + h))
+    se_fit = np.sqrt(mse * h)
+    se_pred = np.sqrt(mse * (1 + h))  # The "1" adds irreducible error variance
+    
+    # t critical value
+    t_crit = stats.t.ppf(1 - alpha/2, df_resid)
+    
+    # Confidence intervals (for mean response)
+    lower_ci = y_pred - t_crit * se_fit
+    upper_ci = y_pred + t_crit * se_fit
+    
+    # Prediction intervals (for individual observations)
+    lower_pi = y_pred - t_crit * se_pred
+    upper_pi = y_pred + t_crit * se_pred
+    
+    return PredictionIntervalResults(
+        y_pred=y_pred,
+        lower_pi=lower_pi,
+        upper_pi=upper_pi,
+        lower_ci=lower_ci,
+        upper_ci=upper_ci,
+        se_pred=se_pred,
+        se_fit=se_fit,
+        alpha=alpha
     )
 
 
@@ -6402,13 +6612,13 @@ def plot_acf_pacf(
 # MODULE EXPORTS
 # =============================================================================
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 __all__ = [
     # Data classes
     'DescriptiveStats', 'NormalityTest', 'RegressionResults', 'ResidualDiagnostics',
     'CorrelationResults', 'ANOVAResults', 'TTestResults', 
     'HatMatrixResults', 'SubsetRegressionResults', 'StepwiseResults',
-    'CovariateCombinations',
+    'CovariateCombinations', 'PredictionIntervalResults',
     'TrainTestSplit', 'ModelValidationResults', 'ModelComparisonResults',
     
     # NEW v2.0 Data classes
@@ -6421,7 +6631,7 @@ __all__ = [
     
     # Core analysis
     'describe', 'test_normality', 'linear_regression', 'residual_diagnostics',
-    'correlation', 'correlation_matrix', 'oneway_anova',
+    'prediction_interval', 'correlation', 'correlation_matrix', 'oneway_anova',
     'ttest_1sample', 'ttest_2sample', 'ttest_paired',
     'normal_probability',
     
