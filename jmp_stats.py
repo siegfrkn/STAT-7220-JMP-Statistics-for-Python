@@ -9,6 +9,14 @@ matplotlib/seaborn for visualization.
 Installation Requirements:
     pip install numpy pandas scipy statsmodels matplotlib seaborn
 
+NEW IN v2.3:
+    - ENHANCED LINEAR REGRESSION:
+        - linear_regression_formula(): Formula-based regression with automatic
+          categorical encoding (e.g., 'y ~ x1 + C(category)')
+        - poly_degree parameter: Automatically generate polynomial terms
+        - log_y parameter: Log-transform response variable
+        - log_X parameter: Log-transform specified predictors
+    
 NEW IN v2.2:
     - PREDICTION INTERVALS:
         - prediction_interval(): Calculate prediction intervals for new observations
@@ -68,27 +76,22 @@ NEW IN v1.1:
 FUTURE DEVELOPMENT (TODO):
     Priority additions for upcoming versions:
     
-    1. CATEGORICAL VARIABLE HANDLING IN REGRESSION:
-        - Add formula-style syntax support (e.g., 'y ~ x1 + C(category)')
-        - Automatic dummy/effect coding within linear_regression()
-        - Reference level selection for categorical predictors
-    
-    2. MIXED EFFECTS MODELS:
+    1. MIXED EFFECTS MODELS:
         - random_effects(): Support for random intercepts and slopes
         - mixed_model(): Linear mixed effects regression (like JMP's Mixed Model)
     
-    3. LOGISTIC REGRESSION:
+    2. LOGISTIC REGRESSION:
         - logistic_regression(): Binary and multinomial logistic regression
         - ROC curves and AUC calculation
         - Classification metrics (confusion matrix, precision, recall)
     
-    4. ENHANCED MODEL SELECTION:
+    3. ENHANCED MODEL SELECTION:
         - cross_validation(): K-fold CV with multiple metrics
         - regularized_regression(): Ridge, Lasso, Elastic Net
         - model_averaging(): Combine predictions from multiple models
     
-    5. ADDITIONAL DIAGNOSTICS:
-        - vif(): Variance Inflation Factors for multicollinearity
+    4. ADDITIONAL DIAGNOSTICS:
+        - vif(): Standalone Variance Inflation Factors function
         - partial_regression_plots(): Added variable plots
         - component_residual_plots(): Partial residual plots
 
@@ -758,7 +761,10 @@ def test_normality(data: Union[pd.Series, np.ndarray, List], alpha: float = 0.05
 def linear_regression(y: Union[pd.Series, np.ndarray],
                       X: Union[pd.DataFrame, np.ndarray, pd.Series],
                       add_constant: bool = True,
-                      alpha: float = 0.05) -> RegressionResults:
+                      alpha: float = 0.05,
+                      poly_degree: int = 1,
+                      log_y: bool = False,
+                      log_X: Optional[List[str]] = None) -> RegressionResults:
     """
     Perform linear regression with comprehensive output (JMP Fit Model style).
     
@@ -772,6 +778,13 @@ def linear_regression(y: Union[pd.Series, np.ndarray],
         Whether to add intercept term
     alpha : float
         Significance level for confidence intervals
+    poly_degree : int, default 1
+        Polynomial degree for predictors. If > 1, automatically generates
+        polynomial terms (e.g., poly_degree=2 adds X^2 terms)
+    log_y : bool, default False
+        If True, log-transform the response variable
+    log_X : list of str, optional
+        List of column names to log-transform. Only works when X is a DataFrame.
         
     Returns
     -------
@@ -780,24 +793,66 @@ def linear_regression(y: Union[pd.Series, np.ndarray],
         
     Example
     -------
+    >>> # Basic regression
     >>> results = linear_regression(df['PRSM'], df[['FICO', 'Repayment_Pct']])
     >>> print(results)
+    
+    >>> # Quadratic regression (auto-generates squared terms)
+    >>> results = linear_regression(df['Sales'], df[['Period']], poly_degree=2)
+    
+    >>> # Log-transformed regression
+    >>> results = linear_regression(df['Revenue'], df[['Commission', 'Selling']], 
+    ...                             log_y=True, log_X=['Commission', 'Selling'])
     """
     if not HAS_STATSMODELS:
         raise ImportError("statsmodels required. Install: pip install statsmodels")
     
+    # Handle log transformation of y
+    y_orig = y
     y = np.asarray(y).flatten()
+    if log_y:
+        if np.any(y <= 0):
+            raise ValueError("Cannot log-transform y: contains non-positive values")
+        y = np.log(y)
     
+    # Convert X to DataFrame for easier manipulation
     if isinstance(X, pd.Series):
         X = X.to_frame()
     if isinstance(X, pd.DataFrame):
+        X_df = X.copy()
         X_names = list(X.columns)
-        X = X.values
     else:
         X = np.asarray(X)
         if X.ndim == 1:
             X = X.reshape(-1, 1)
         X_names = [f'X{i+1}' for i in range(X.shape[1])]
+        X_df = pd.DataFrame(X, columns=X_names)
+    
+    # Handle log transformation of specified X columns
+    if log_X is not None:
+        for col in log_X:
+            if col in X_df.columns:
+                if np.any(X_df[col] <= 0):
+                    # Add small constant to handle zeros
+                    X_df[col] = np.log(X_df[col].replace(0, 0.001))
+                else:
+                    X_df[col] = np.log(X_df[col])
+                # Rename column to indicate log transform
+                X_df = X_df.rename(columns={col: f'Log_{col}'})
+        X_names = list(X_df.columns)
+    
+    # Handle polynomial terms
+    if poly_degree > 1:
+        new_cols = {}
+        for col in list(X_df.columns):
+            for p in range(2, poly_degree + 1):
+                new_col_name = f'{col}^{p}' if not col.startswith('Log_') else f'{col}^{p}'
+                new_cols[new_col_name] = X_df[col] ** p
+        for col_name, col_data in new_cols.items():
+            X_df[col_name] = col_data
+        X_names = list(X_df.columns)
+    
+    X = X_df.values
     
     mask = ~(np.isnan(y) | np.any(np.isnan(X), axis=1))
     y = y[mask]
@@ -885,6 +940,132 @@ def linear_regression(y: Union[pd.Series, np.ndarray],
         vif=vif,
         residuals=residuals,
         predicted=predictions,
+        conf_int=conf_int
+    )
+
+
+def linear_regression_formula(formula: str,
+                               data: pd.DataFrame,
+                               alpha: float = 0.05) -> RegressionResults:
+    """
+    Perform linear regression using R-style formula with automatic categorical encoding.
+    
+    This function provides a convenient interface for regression with categorical
+    variables, similar to JMP's automatic handling of nominal variables.
+    
+    Parameters
+    ----------
+    formula : str
+        R-style formula (e.g., 'y ~ x1 + x2 + C(category)')
+        Use C(varname) to explicitly treat a variable as categorical.
+        Categorical variables are automatically dummy-coded.
+    data : DataFrame
+        DataFrame containing all variables referenced in the formula
+    alpha : float
+        Significance level for confidence intervals
+        
+    Returns
+    -------
+    RegressionResults
+        Comprehensive regression results object
+        
+    Example
+    -------
+    >>> # Basic regression with categorical variable
+    >>> results = linear_regression_formula(
+    ...     'Sales ~ Price + C(Region) + Advertising',
+    ...     data=df
+    ... )
+    
+    >>> # With interaction terms
+    >>> results = linear_regression_formula(
+    ...     'Revenue ~ C(Territory) + C(Gender) + Age + Score',
+    ...     data=hiring
+    ... )
+    
+    >>> # Log transform in formula
+    >>> results = linear_regression_formula(
+    ...     'np.log(Revenue) ~ np.log(Commission) + C(Status)',
+    ...     data=df
+    ... )
+    
+    Notes
+    -----
+    - Categorical variables are automatically dummy-coded with the first level as reference
+    - Use Q("Variable Name") for variable names with spaces or special characters
+    - Supports numpy functions in formula (e.g., np.log, np.sqrt)
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels required. Install: pip install statsmodels")
+    
+    import statsmodels.formula.api as smf
+    
+    # Fit model using formula API
+    model = smf.ols(formula, data=data).fit()
+    
+    # Extract results
+    n = int(model.nobs)
+    predictions = model.predict(data)
+    residuals = model.resid
+    
+    rmse = float(np.sqrt(np.mean(residuals**2)))
+    mae = float(np.mean(np.abs(residuals)))
+    y_values = model.model.endog
+    mape = float(np.mean(np.abs(residuals / y_values)) * 100) if np.all(y_values != 0) else np.nan
+    
+    # Parse parameter names (excluding Intercept)
+    param_names = [p for p in model.params.index if p != 'Intercept']
+    
+    intercept = float(model.params.get('Intercept', 0))
+    intercept_se = float(model.bse.get('Intercept', 0))
+    intercept_t = float(model.tvalues.get('Intercept', np.nan))
+    intercept_p = float(model.pvalues.get('Intercept', np.nan))
+    
+    slopes = {name: float(model.params[name]) for name in param_names}
+    slope_se = {name: float(model.bse[name]) for name in param_names}
+    slope_t = {name: float(model.tvalues[name]) for name in param_names}
+    slope_p = {name: float(model.pvalues[name]) for name in param_names}
+    
+    ci = model.conf_int(alpha)
+    conf_int = {'Intercept': (float(ci.loc['Intercept', 0]), float(ci.loc['Intercept', 1]))} if 'Intercept' in ci.index else {}
+    for name in param_names:
+        conf_int[name] = (float(ci.loc[name, 0]), float(ci.loc[name, 1]))
+    
+    # VIF calculation for formula models is complex due to categorical expansion
+    # Skip for now
+    vif = None
+    
+    dw = float(durbin_watson(residuals))
+    
+    return RegressionResults(
+        r_squared=float(model.rsquared),
+        adj_r_squared=float(model.rsquared_adj),
+        rmse=rmse,
+        mae=mae,
+        mape=mape,
+        intercept=intercept,
+        intercept_se=intercept_se,
+        intercept_tstat=intercept_t,
+        intercept_pvalue=intercept_p,
+        slopes=slopes,
+        slope_se=slope_se,
+        slope_tstat=slope_t,
+        slope_pvalue=slope_p,
+        ss_regression=float(model.ess),
+        ss_residual=float(model.ssr),
+        ss_total=float(model.ess + model.ssr),
+        df_regression=int(model.df_model),
+        df_residual=int(model.df_resid),
+        df_total=int(model.df_model + model.df_resid),
+        ms_regression=float(model.mse_model),
+        ms_residual=float(model.mse_resid),
+        f_statistic=float(model.fvalue),
+        f_pvalue=float(model.f_pvalue),
+        durbin_watson=dw,
+        n_obs=n,
+        vif=vif,
+        residuals=np.array(residuals),
+        predicted=np.array(predictions),
         conf_int=conf_int
     )
 
@@ -6630,9 +6811,9 @@ __all__ = [
     'read_csv', 'read_excel',
     
     # Core analysis
-    'describe', 'test_normality', 'linear_regression', 'residual_diagnostics',
-    'prediction_interval', 'correlation', 'correlation_matrix', 'oneway_anova',
-    'ttest_1sample', 'ttest_2sample', 'ttest_paired',
+    'describe', 'test_normality', 'linear_regression', 'linear_regression_formula',
+    'residual_diagnostics', 'prediction_interval', 'correlation', 'correlation_matrix', 
+    'oneway_anova', 'ttest_1sample', 'ttest_2sample', 'ttest_paired',
     'normal_probability',
     
     # Hat matrix and influence
