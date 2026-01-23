@@ -1,7 +1,7 @@
 # JMP-Stats: JMP-Style Statistical Analysis for Python
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Version 2.2.0](https://img.shields.io/badge/version-2.2.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
+[![Version 2.3.0](https://img.shields.io/badge/version-2.3.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
 
 A comprehensive Python library that replicates JMP's statistical analysis capabilities for predictive analytics. Designed for students and practitioners who want to perform the same analyses in Python that they would do in JMP.
 
@@ -65,6 +65,19 @@ print(stats)
 # Simple linear regression
 results = jmp.linear_regression(df['y'], df[['x1', 'x2', 'x3']])
 print(results)
+
+# Polynomial regression (auto-generates x^2 terms)
+results = jmp.linear_regression(df['Sales'], df[['Period']], poly_degree=2)
+
+# Log-transformed regression
+results = jmp.linear_regression(df['Revenue'], df[['Commission', 'Sales']], 
+                                 log_y=True, log_X=['Commission', 'Sales'])
+
+# Formula-based regression with categorical variables
+results = jmp.linear_regression_formula(
+    'Revenue ~ Price + C(Region) + C(Category)',
+    data=df
+)
 
 # Prediction intervals for new observations
 pi = jmp.prediction_interval(df['y'], df[['x1', 'x2']], X_new)
@@ -142,6 +155,68 @@ print(results)
 - Parameter estimates with t-ratios, p-values, and confidence intervals
 - VIF (Variance Inflation Factors) for multicollinearity
 - Durbin-Watson statistic
+
+#### Polynomial Regression
+
+Automatically generate polynomial terms with `poly_degree`:
+
+```python
+# Quadratic model: y = b0 + b1*x + b2*x^2
+results = jmp.linear_regression(df['Sales'], df[['Period']], poly_degree=2)
+print(results.slopes)  # {'Period': 40.09, 'Period^2': 3.28}
+
+# Cubic model
+results = jmp.linear_regression(df['y'], df[['x']], poly_degree=3)
+```
+
+#### Log Transformations
+
+Apply log transforms directly in the regression call:
+
+```python
+# Log-transform response only
+results = jmp.linear_regression(df['Revenue'], df[['x1', 'x2']], log_y=True)
+
+# Log-transform specific predictors
+results = jmp.linear_regression(
+    df['Revenue'], 
+    df[['Commission', 'Selling', 'Age']],
+    log_y=True,
+    log_X=['Commission', 'Selling']  # Age stays untransformed
+)
+```
+
+#### Formula-Based Regression with Categorical Variables
+
+Use R-style formulas for automatic categorical encoding:
+
+```python
+# Categorical variables with C()
+results = jmp.linear_regression_formula(
+    'Sales ~ Price + C(Region) + Advertising',
+    data=df
+)
+
+# Multiple categorical variables
+results = jmp.linear_regression_formula(
+    'Log_Revenue ~ Log_Commission + C(Territory) + C(Gender) + C(Marital_Status)',
+    data=hiring
+)
+
+# Use Q() for variable names with spaces
+results = jmp.linear_regression_formula(
+    'Revenue ~ Q("Test Score") + C(Q("Marital Status"))',
+    data=df
+)
+
+# Log transforms in formula
+results = jmp.linear_regression_formula(
+    'np.log(Revenue) ~ np.log(Commission) + C(Status)',
+    data=df
+)
+```
+
+#### Residual Diagnostics
 
 ```python
 # Get residual diagnostics
@@ -601,7 +676,8 @@ print(f"Forecasts: {forecast['forecast']}")
 
 | Function | Description |
 |----------|-------------|
-| `linear_regression()` | OLS regression with full output |
+| `linear_regression()` | OLS regression with poly_degree, log_y, log_X options |
+| `linear_regression_formula()` | Formula-based regression with automatic categorical encoding |
 | `prediction_interval()` | Prediction and confidence intervals for new data |
 | `residual_diagnostics()` | Residual analysis and tests |
 | `fit_y_by_x()` | JMP-style bivariate fit |
@@ -781,6 +857,18 @@ jmp.interaction_plot(design, 'Yield', 'Temperature', 'Pressure')
 3. **Compare multiple criteria** - BIC, AIC, and cross-validation often give different answers
 4. **Check for overfitting** - Look for large gaps between train and test R-squared
 
+### Regression with Transformations
+1. **Use `poly_degree` for curved relationships** - Saves manual column creation
+2. **Use `log_y=True` for skewed responses** - Common in revenue/sales data
+3. **Use `log_X` for skewed predictors** - Specify which columns to transform
+4. **Check distributions first** - Log transforms require positive values
+
+### Categorical Variables
+1. **Use `linear_regression_formula()` for categorical predictors** - Handles encoding automatically
+2. **Use `C(varname)` syntax** - Explicitly marks categorical variables  
+3. **Use `Q("Variable Name")` for spaces** - Handles special characters in column names
+4. **First level is reference** - Coefficients are relative to the first category
+
 ### Regression Diagnostics
 1. **Check VIF values** - VIF > 10 suggests multicollinearity
 2. **Review influence diagnostics** - Remove or investigate high-leverage points
@@ -807,27 +895,22 @@ jmp.interaction_plot(design, 'Yield', 'Temperature', 'Pressure')
 
 Priority additions for upcoming versions:
 
-1. **Categorical Variable Handling in Regression**
-   - Formula-style syntax support (e.g., `'y ~ x1 + C(category)'`)
-   - Automatic dummy/effect coding within `linear_regression()`
-   - Reference level selection for categorical predictors
-
-2. **Mixed Effects Models**
+1. **Mixed Effects Models**
    - `random_effects()`: Support for random intercepts and slopes
    - `mixed_model()`: Linear mixed effects regression (like JMP's Mixed Model)
 
-3. **Logistic Regression**
+2. **Logistic Regression**
    - `logistic_regression()`: Binary and multinomial logistic regression
    - ROC curves and AUC calculation
    - Classification metrics (confusion matrix, precision, recall)
 
-4. **Enhanced Model Selection**
+3. **Enhanced Model Selection**
    - `cross_validation()`: K-fold CV with multiple metrics
    - `regularized_regression()`: Ridge, Lasso, Elastic Net
    - `model_averaging()`: Combine predictions from multiple models
 
-5. **Additional Diagnostics**
-   - `vif()`: Variance Inflation Factors for multicollinearity
+4. **Additional Diagnostics**
+   - `vif()`: Standalone Variance Inflation Factors function
    - `partial_regression_plots()`: Added variable plots
    - `component_residual_plots()`: Partial residual plots
 
@@ -847,6 +930,7 @@ Contributions welcome! Please submit issues and pull requests on GitHub.
 
 ## Version History
 
+- **v2.3.0** - Enhanced `linear_regression()` with `poly_degree`, `log_y`, `log_X` parameters; added `linear_regression_formula()` for categorical variables
 - **v2.2.0** - Added prediction intervals (`prediction_interval()`) for forecasting with CI and PI
 - **v2.1.0** - Added categorical variable encoding (`encode_categorical()`, `encode_effect()`)
 - **v2.0.0** - Added leverage plots, prediction profiler, DOE, time series analysis
