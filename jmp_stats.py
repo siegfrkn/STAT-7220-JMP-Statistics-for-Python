@@ -7690,6 +7690,160 @@ def plot_logistic_diagnostics(
     return fig
 
 
+def plot_logistic_bivariate(
+    result: LogisticRegressionResults,
+    feature: Optional[str] = None,
+    figsize: Tuple[int, int] = (10, 7),
+    show_threshold: bool = True,
+    show_rug: bool = True,
+    n_grid: int = 200
+) -> Optional[Any]:
+    """
+    JMP-style Bivariate Fit diagram for logistic regression.
+    
+    Creates the classic logistic S-curve plot showing:
+    - Actual outcomes (0/1) as points (jittered for visibility)
+    - Fitted probability curve
+    - Optional threshold line
+    - Rug plots showing distribution of X for each outcome
+    
+    This replicates JMP's Fit Y by X > Logistic plot.
+    
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Results from logistic_regression()
+    feature : str, optional
+        Which predictor to plot on X-axis. Required if multiple predictors.
+        If single predictor model, uses that predictor automatically.
+    figsize : tuple, default=(10, 7)
+        Figure size
+    show_threshold : bool, default=True
+        Whether to show the classification threshold line
+    show_rug : bool, default=True
+        Whether to show rug plots for each outcome level
+    n_grid : int, default=200
+        Number of points for the fitted curve
+        
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+    
+    Examples
+    --------
+    >>> result = jmp.logistic_regression(df['Status'], df[['Schedule lag']], plot=False)
+    >>> jmp.plot_logistic_bivariate(result)
+    
+    >>> # For multiple predictors, specify which one to plot
+    >>> result = jmp.logistic_regression(df['Status'], df[['Age', 'Weight']], plot=False)
+    >>> jmp.plot_logistic_bivariate(result, feature='Age')
+    """
+    if not HAS_MATPLOTLIB:
+        print("matplotlib required for plotting")
+        return None
+    
+    # Determine which feature to plot
+    if feature is None:
+        if len(result.feature_names) == 1:
+            feature = result.feature_names[0]
+        else:
+            raise ValueError(f"Multiple predictors in model. Specify which feature to plot: {result.feature_names}")
+    
+    if feature not in result.feature_names:
+        raise ValueError(f"Feature '{feature}' not in model. Available: {result.feature_names}")
+    
+    # Get data
+    x_vals = result.X_clean[feature].values
+    y_binary = result.y_binary.values
+    y_prob = result.predicted_probs[f'Prob[{result.target_level}]'].values
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Create smooth grid for fitted curve
+    x_min, x_max = x_vals.min(), x_vals.max()
+    x_range = x_max - x_min
+    x_grid = np.linspace(x_min - 0.05 * x_range, x_max + 0.05 * x_range, n_grid)
+    
+    # For single predictor, calculate predictions directly
+    # For multiple predictors, hold others at mean
+    if len(result.feature_names) == 1:
+        X_grid_df = pd.DataFrame({feature: x_grid})
+        X_grid_const = sm.add_constant(X_grid_df)
+        p_grid = result.model.predict(X_grid_const)
+    else:
+        # Hold other predictors at their means
+        X_grid_df = pd.DataFrame({f: np.full(n_grid, result.X_clean[f].mean()) 
+                                  for f in result.feature_names})
+        X_grid_df[feature] = x_grid
+        # Reorder columns to match original order and add constant
+        X_grid_ordered = X_grid_df[result.feature_names]
+        X_grid_const = sm.add_constant(X_grid_ordered, has_constant='add')
+        p_grid = result.model.predict(X_grid_const)
+    
+    # Jitter y values for visibility
+    jitter_amount = 0.03
+    np.random.seed(42)
+    y_jittered = y_binary + np.random.uniform(-jitter_amount, jitter_amount, len(y_binary))
+    
+    # Plot actual outcomes with different colors
+    mask_0 = y_binary == 0
+    mask_1 = y_binary == 1
+    
+    ax.scatter(x_vals[mask_0], y_jittered[mask_0], 
+               alpha=0.5, s=40, c='#d62728', label=f'{result.other_level}', 
+               edgecolors='white', linewidth=0.5)
+    ax.scatter(x_vals[mask_1], y_jittered[mask_1], 
+               alpha=0.5, s=40, c='#2ca02c', label=f'{result.target_level}',
+               edgecolors='white', linewidth=0.5)
+    
+    # Plot fitted probability curve
+    ax.plot(x_grid, p_grid, 'b-', linewidth=3, label='Fitted Probability')
+    
+    # Add threshold line
+    if show_threshold:
+        ax.axhline(y=result.threshold, color='gray', linestyle='--', 
+                   linewidth=1.5, alpha=0.7, label=f'Threshold = {result.threshold}')
+    
+    # Add rug plots
+    if show_rug:
+        # Bottom rug for outcome = 0
+        ax.plot(x_vals[mask_0], np.zeros(mask_0.sum()) - 0.02, '|', 
+                color='#d62728', alpha=0.5, markersize=10)
+        # Top rug for outcome = 1
+        ax.plot(x_vals[mask_1], np.ones(mask_1.sum()) + 0.02, '|', 
+                color='#2ca02c', alpha=0.5, markersize=10)
+    
+    # Labels and formatting
+    ax.set_xlabel(feature, fontsize=12)
+    ax.set_ylabel(f'P({result.target_level})', fontsize=12)
+    ax.set_title(f'Bivariate Fit: {result.target_level} by {feature}\n'
+                 f'AUC = {result.auc:.4f}, Misclass = {result.misclassification_rate:.2%}', 
+                 fontsize=12)
+    
+    # Set y-axis limits with padding
+    ax.set_ylim(-0.1, 1.1)
+    ax.set_xlim(x_min - 0.05 * x_range, x_max + 0.05 * x_range)
+    
+    # Add y-axis labels for outcome levels
+    ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+    ax2 = ax.twinx()
+    ax2.set_ylim(-0.1, 1.1)
+    ax2.set_yticks([0, 1])
+    ax2.set_yticklabels([result.other_level, result.target_level], fontsize=10)
+    
+    # Legend
+    ax.legend(loc='center right', fontsize=10)
+    
+    # Grid
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
+
+
 def plot_logistic_roc(
     result: LogisticRegressionResults,
     figsize: Tuple[int, int] = (12, 5)
@@ -9132,7 +9286,8 @@ __all__ = [
     
     # NEW v2.5.0: Logistic Regression
     'LogisticRegressionResults', 'logistic_regression', 'plot_logistic_diagnostics',
-    'plot_logistic_roc', 'roc_curve', 'confusion_matrix_stats', 'save_logistic_predictions',
+    'plot_logistic_bivariate', 'plot_logistic_roc', 'roc_curve', 'confusion_matrix_stats', 
+    'save_logistic_predictions',
     
     # Utilities
     'detect_outliers', 'recode', 'log_transform',
