@@ -7,7 +7,25 @@ using single function calls. Leverages scipy, statsmodels, pandas, numpy, and
 matplotlib/seaborn for visualization.
 
 Installation Requirements:
-    pip install numpy pandas scipy statsmodels matplotlib seaborn
+    pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn
+
+NEW IN v2.5.0:
+    - K NEAREST NEIGHBORS (JMP's Analyze > Predictive Modeling > K Nearest Neighbors):
+        - k_nearest_neighbors(): Auto-detects classification/regression
+        - knn_classification(): Convenience wrapper for classification
+        - knn_regression(): Convenience wrapper for regression
+        - Automatic K selection based on validation error
+        - Confusion matrix and misclassification rates
+        - plot_knn_results(): JMP-style error rate plots
+        - save_knn_predictions(): Like JMP's Save Predicteds
+        - knn_lift_curve(): Lift curves for classification
+        - Support for validation_column (JMP-style train/validation/test)
+    
+    - BOOTSTRAP METHODS (JMP's Bootstrap command):
+        - bootstrap(): Generic bootstrap for any statistic
+        - bootstrap_rmse(): Bootstrap confidence interval for RMSE
+        - plot_bootstrap_distribution(): Visualize bootstrap distribution
+        - Supports percentile, basic, and BCa confidence intervals
 
 NEW IN v2.3:
     - ENHANCED LINEAR REGRESSION:
@@ -236,6 +254,15 @@ try:
     HAS_STATSMODELS = True
 except ImportError:
     HAS_STATSMODELS = False
+
+# sklearn imports for KNN
+try:
+    from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.model_selection import train_test_split as sklearn_train_test_split
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
 
 
 # =============================================================================
@@ -6790,10 +6817,1116 @@ def plot_acf_pacf(
 
 
 # =============================================================================
+# BOOTSTRAP METHODS (Added v2.5.0)
+# =============================================================================
+
+@dataclass
+class BootstrapResults:
+    """
+    Results container for bootstrap analysis (JMP-style).
+    
+    Attributes
+    ----------
+    statistic_name : str
+        Name of the statistic being bootstrapped
+    observed : float
+        Observed value of the statistic
+    boot_mean : float
+        Mean of bootstrap distribution
+    boot_std : float
+        Standard deviation of bootstrap distribution (bootstrap SE)
+    bias : float
+        Estimated bias (boot_mean - observed)
+    ci_lower : float
+        Lower bound of confidence interval
+    ci_upper : float
+        Upper bound of confidence interval
+    ci_level : float
+        Confidence level (e.g., 0.90 for 90%)
+    ci_method : str
+        Method used for CI ('percentile', 'bca', 'basic')
+    n_bootstrap : int
+        Number of bootstrap samples
+    bootstrap_distribution : np.ndarray
+        Array of bootstrap statistics
+    """
+    statistic_name: str
+    observed: float
+    boot_mean: float
+    boot_std: float
+    bias: float
+    ci_lower: float
+    ci_upper: float
+    ci_level: float
+    ci_method: str
+    n_bootstrap: int
+    bootstrap_distribution: np.ndarray
+    
+    def __repr__(self):
+        lines = []
+        lines.append("=" * 60)
+        lines.append(f"Bootstrap Results: {self.statistic_name}")
+        lines.append("=" * 60)
+        lines.append(f"Observed Value:        {self.observed:.6f}")
+        lines.append(f"Bootstrap Mean:        {self.boot_mean:.6f}")
+        lines.append(f"Bootstrap Std Error:   {self.boot_std:.6f}")
+        lines.append(f"Bias:                  {self.bias:.6f}")
+        lines.append("")
+        lines.append(f"{self.ci_level*100:.0f}% Confidence Interval ({self.ci_method}):")
+        lines.append(f"  Lower:               {self.ci_lower:.6f}")
+        lines.append(f"  Upper:               {self.ci_upper:.6f}")
+        lines.append(f"")
+        lines.append(f"Number of Bootstraps:  {self.n_bootstrap}")
+        return "\n".join(lines)
+
+
+def bootstrap(
+    data: Union[pd.DataFrame, np.ndarray],
+    statistic_func: callable,
+    n_bootstrap: int = 1000,
+    ci_level: float = 0.90,
+    ci_method: str = 'percentile',
+    random_state: Optional[int] = None,
+    statistic_name: str = 'Statistic'
+) -> BootstrapResults:
+    """
+    Bootstrap confidence intervals for any statistic (JMP-style).
+    
+    Replicates JMP's Analyze > Distribution > Bootstrap or 
+    the Bootstrap option available in various JMP platforms.
+    
+    Parameters
+    ----------
+    data : DataFrame or array
+        Data to resample
+    statistic_func : callable
+        Function that takes data and returns a scalar statistic.
+        E.g., lambda x: np.mean(x) or lambda x: np.std(x)
+    n_bootstrap : int, default=1000
+        Number of bootstrap resamples
+    ci_level : float, default=0.90
+        Confidence level (0.90 = 90% CI)
+    ci_method : str, default='percentile'
+        Method for CI: 'percentile', 'basic', or 'bca'
+    random_state : int, optional
+        Random seed for reproducibility
+    statistic_name : str, default='Statistic'
+        Name of the statistic (for display)
+        
+    Returns
+    -------
+    BootstrapResults
+        Object containing bootstrap CI and distribution
+        
+    Examples
+    --------
+    >>> # Bootstrap mean
+    >>> result = bootstrap(df['price'], lambda x: np.mean(x), ci_level=0.95)
+    >>> print(result)
+    
+    >>> # Bootstrap correlation
+    >>> result = bootstrap(df[['x', 'y']], lambda d: d['x'].corr(d['y']))
+    """
+    if random_state is not None:
+        np.random.seed(random_state)
+    
+    # Convert to numpy if needed
+    if isinstance(data, pd.DataFrame):
+        data_arr = data.values
+        is_df = True
+        columns = data.columns
+        index_name = data.index.name
+    elif isinstance(data, pd.Series):
+        data_arr = data.values
+        is_df = False
+    else:
+        data_arr = np.asarray(data)
+        is_df = False
+    
+    n = len(data_arr)
+    
+    # Calculate observed statistic
+    if is_df:
+        observed = statistic_func(data)
+    else:
+        observed = statistic_func(data_arr)
+    
+    # Bootstrap resampling
+    boot_stats = np.zeros(n_bootstrap)
+    
+    for i in range(n_bootstrap):
+        # Resample with replacement
+        indices = np.random.randint(0, n, size=n)
+        
+        if is_df:
+            boot_sample = pd.DataFrame(data_arr[indices], columns=columns)
+            boot_stats[i] = statistic_func(boot_sample)
+        else:
+            boot_sample = data_arr[indices]
+            boot_stats[i] = statistic_func(boot_sample)
+    
+    # Calculate bootstrap statistics
+    boot_mean = np.mean(boot_stats)
+    boot_std = np.std(boot_stats, ddof=1)
+    bias = boot_mean - observed
+    
+    # Calculate confidence interval
+    alpha = 1 - ci_level
+    
+    if ci_method == 'percentile':
+        ci_lower = np.percentile(boot_stats, alpha/2 * 100)
+        ci_upper = np.percentile(boot_stats, (1 - alpha/2) * 100)
+    elif ci_method == 'basic':
+        # Basic bootstrap: 2*observed - percentiles
+        ci_lower = 2*observed - np.percentile(boot_stats, (1 - alpha/2) * 100)
+        ci_upper = 2*observed - np.percentile(boot_stats, alpha/2 * 100)
+    elif ci_method == 'bca':
+        # BCa (bias-corrected and accelerated) - simplified version
+        # Calculate z0 (bias correction)
+        z0 = norm.ppf(np.mean(boot_stats < observed))
+        
+        # Calculate acceleration (jackknife)
+        jack_stats = np.zeros(n)
+        for j in range(n):
+            jack_mask = np.ones(n, dtype=bool)
+            jack_mask[j] = False
+            if is_df:
+                jack_sample = pd.DataFrame(data_arr[jack_mask], columns=columns)
+                jack_stats[j] = statistic_func(jack_sample)
+            else:
+                jack_stats[j] = statistic_func(data_arr[jack_mask])
+        
+        jack_mean = np.mean(jack_stats)
+        acc = np.sum((jack_mean - jack_stats)**3) / (6 * np.sum((jack_mean - jack_stats)**2)**1.5)
+        
+        # Adjusted percentiles
+        z_alpha_lower = norm.ppf(alpha/2)
+        z_alpha_upper = norm.ppf(1 - alpha/2)
+        
+        adj_lower = norm.cdf(z0 + (z0 + z_alpha_lower) / (1 - acc * (z0 + z_alpha_lower)))
+        adj_upper = norm.cdf(z0 + (z0 + z_alpha_upper) / (1 - acc * (z0 + z_alpha_upper)))
+        
+        ci_lower = np.percentile(boot_stats, adj_lower * 100)
+        ci_upper = np.percentile(boot_stats, adj_upper * 100)
+    else:
+        raise ValueError(f"Unknown ci_method: {ci_method}. Use 'percentile', 'basic', or 'bca'")
+    
+    return BootstrapResults(
+        statistic_name=statistic_name,
+        observed=observed,
+        boot_mean=boot_mean,
+        boot_std=boot_std,
+        bias=bias,
+        ci_lower=ci_lower,
+        ci_upper=ci_upper,
+        ci_level=ci_level,
+        ci_method=ci_method,
+        n_bootstrap=n_bootstrap,
+        bootstrap_distribution=boot_stats
+    )
+
+
+def bootstrap_rmse(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray],
+    n_bootstrap: int = 1000,
+    ci_level: float = 0.90,
+    ci_method: str = 'percentile',
+    random_state: Optional[int] = None
+) -> BootstrapResults:
+    """
+    Bootstrap confidence interval for RMSE (JMP-style).
+    
+    This replicates JMP's Bootstrap command for regression RMSE,
+    which resamples the data, refits the model, and calculates RMSE
+    for each bootstrap sample.
+    
+    Parameters
+    ----------
+    y : array-like
+        Response variable
+    X : DataFrame or array-like
+        Predictor variables
+    n_bootstrap : int, default=1000
+        Number of bootstrap samples
+    ci_level : float, default=0.90
+        Confidence level (0.90 = 90% CI)
+    ci_method : str, default='percentile'
+        Method for CI: 'percentile', 'basic', or 'bca'
+    random_state : int, optional
+        Random seed for reproducibility
+        
+    Returns
+    -------
+    BootstrapResults
+        Bootstrap confidence interval for RMSE
+        
+    Examples
+    --------
+    >>> result = bootstrap_rmse(df['y'], df[['x1', 'x2']], ci_level=0.90)
+    >>> print(f"90% CI: ({result.ci_lower:.4f}, {result.ci_upper:.4f})")
+    
+    Notes
+    -----
+    JMP Pro's Bootstrap command for regression refits the model on each
+    bootstrap sample and computes the statistic. This function does the same.
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels required for bootstrap_rmse. Install: pip install statsmodels")
+    
+    if random_state is not None:
+        np.random.seed(random_state)
+    
+    # Convert inputs
+    y = np.asarray(y).flatten()
+    if isinstance(X, pd.DataFrame):
+        X_arr = X.values
+        feature_names = list(X.columns)
+    else:
+        X_arr = np.asarray(X)
+        if X_arr.ndim == 1:
+            X_arr = X_arr.reshape(-1, 1)
+        feature_names = [f'X{i+1}' for i in range(X_arr.shape[1])]
+    
+    # Remove missing values
+    mask = ~(np.isnan(y) | np.any(np.isnan(X_arr), axis=1))
+    y_clean = y[mask]
+    X_clean = X_arr[mask]
+    
+    n = len(y_clean)
+    
+    # Calculate observed RMSE
+    X_design = sm.add_constant(X_clean)
+    model = sm.OLS(y_clean, X_design).fit()
+    observed_rmse = np.sqrt(model.mse_resid)
+    
+    # Bootstrap resampling
+    boot_rmse = np.zeros(n_bootstrap)
+    
+    for i in range(n_bootstrap):
+        # Resample with replacement
+        indices = np.random.randint(0, n, size=n)
+        y_boot = y_clean[indices]
+        X_boot = X_clean[indices]
+        
+        # Fit model on bootstrap sample
+        X_boot_design = sm.add_constant(X_boot)
+        try:
+            boot_model = sm.OLS(y_boot, X_boot_design).fit()
+            boot_rmse[i] = np.sqrt(boot_model.mse_resid)
+        except:
+            boot_rmse[i] = np.nan
+    
+    # Remove any failed fits
+    boot_rmse = boot_rmse[~np.isnan(boot_rmse)]
+    
+    # Calculate bootstrap statistics
+    boot_mean = np.mean(boot_rmse)
+    boot_std = np.std(boot_rmse, ddof=1)
+    bias = boot_mean - observed_rmse
+    
+    # Calculate confidence interval
+    alpha = 1 - ci_level
+    
+    if ci_method == 'percentile':
+        ci_lower = np.percentile(boot_rmse, alpha/2 * 100)
+        ci_upper = np.percentile(boot_rmse, (1 - alpha/2) * 100)
+    elif ci_method == 'basic':
+        ci_lower = 2*observed_rmse - np.percentile(boot_rmse, (1 - alpha/2) * 100)
+        ci_upper = 2*observed_rmse - np.percentile(boot_rmse, alpha/2 * 100)
+    else:
+        ci_lower = np.percentile(boot_rmse, alpha/2 * 100)
+        ci_upper = np.percentile(boot_rmse, (1 - alpha/2) * 100)
+    
+    return BootstrapResults(
+        statistic_name='RMSE',
+        observed=observed_rmse,
+        boot_mean=boot_mean,
+        boot_std=boot_std,
+        bias=bias,
+        ci_lower=ci_lower,
+        ci_upper=ci_upper,
+        ci_level=ci_level,
+        ci_method=ci_method,
+        n_bootstrap=len(boot_rmse),
+        bootstrap_distribution=boot_rmse
+    )
+
+
+def plot_bootstrap_distribution(
+    result: BootstrapResults,
+    figsize: Tuple[int, int] = (10, 6)
+) -> Optional[Any]:
+    """
+    Plot bootstrap distribution with confidence interval.
+    
+    Parameters
+    ----------
+    result : BootstrapResults
+        Results from bootstrap() or bootstrap_rmse()
+    figsize : tuple, default=(10, 6)
+        Figure size
+        
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Histogram of bootstrap distribution
+    ax.hist(result.bootstrap_distribution, bins=50, density=True, 
+            alpha=0.7, color='steelblue', edgecolor='white')
+    
+    # Mark observed value
+    ax.axvline(result.observed, color='red', linestyle='-', linewidth=2,
+               label=f'Observed = {result.observed:.4f}')
+    
+    # Mark CI
+    ax.axvline(result.ci_lower, color='green', linestyle='--', linewidth=2,
+               label=f'{result.ci_level*100:.0f}% CI Lower = {result.ci_lower:.4f}')
+    ax.axvline(result.ci_upper, color='green', linestyle='--', linewidth=2,
+               label=f'{result.ci_level*100:.0f}% CI Upper = {result.ci_upper:.4f}')
+    
+    # Shade CI region
+    ax.axvspan(result.ci_lower, result.ci_upper, alpha=0.2, color='green')
+    
+    ax.set_xlabel(result.statistic_name, fontsize=11)
+    ax.set_ylabel('Density', fontsize=11)
+    ax.set_title(f'Bootstrap Distribution of {result.statistic_name}\n'
+                 f'({result.n_bootstrap} resamples, {result.ci_method} CI)', fontsize=12)
+    ax.legend(loc='upper right', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
+# =============================================================================
+# K NEAREST NEIGHBORS - JMP Style (Added v2.5.0)
+# =============================================================================
+
+@dataclass
+class KNNResult:
+    """
+    Results container for K Nearest Neighbors analysis (JMP-style).
+    
+    Attributes
+    ----------
+    response_type : str
+        'classification' or 'regression'
+    optimal_k : int
+        The K value with best performance on validation data
+    k_values : np.ndarray
+        Array of K values evaluated
+    train_errors : np.ndarray
+        Error rates/RMSE on training data for each K
+    validation_errors : np.ndarray
+        Error rates/RMSE on validation data for each K
+    test_errors : np.ndarray or None
+        Error rates/RMSE on test data for each K (if test set provided)
+    confusion_matrix : pd.DataFrame or None
+        Confusion matrix at optimal K (classification only)
+    confusion_rates : pd.DataFrame or None
+        Misclassification rates by class (classification only)
+    model : object
+        Fitted KNN model at optimal K
+    scaler : object
+        Fitted scaler used for feature standardization
+    predictions : pd.Series
+        Predictions on validation data at optimal K
+    probabilities : pd.DataFrame or None
+        Class probabilities (classification only)
+    feature_names : list
+        Names of features used
+    classes : np.ndarray or None
+        Class labels (classification only)
+    summary_table : pd.DataFrame
+        Summary of performance across all K values
+    """
+    response_type: str
+    optimal_k: int
+    k_values: np.ndarray
+    train_errors: np.ndarray
+    validation_errors: np.ndarray
+    test_errors: Optional[np.ndarray]
+    confusion_matrix: Optional[pd.DataFrame]
+    confusion_rates: Optional[pd.DataFrame]
+    model: object
+    scaler: object
+    predictions: pd.Series
+    probabilities: Optional[pd.DataFrame]
+    feature_names: list
+    classes: Optional[np.ndarray]
+    summary_table: pd.DataFrame
+    X_train_scaled: np.ndarray = None
+    y_train: np.ndarray = None
+    
+    def __repr__(self):
+        lines = []
+        lines.append("=" * 70)
+        lines.append("K Nearest Neighbors Results")
+        lines.append("=" * 70)
+        lines.append(f"Response Type: {self.response_type.title()}")
+        lines.append(f"Number of Features: {len(self.feature_names)}")
+        lines.append(f"Features: {', '.join(self.feature_names[:5])}" + 
+                    ("..." if len(self.feature_names) > 5 else ""))
+        lines.append("")
+        
+        lines.append("-" * 70)
+        lines.append("Optimal K Selection")
+        lines.append("-" * 70)
+        lines.append(f"Optimal K: {self.optimal_k}")
+        
+        opt_idx = list(self.k_values).index(self.optimal_k) if self.optimal_k in self.k_values else 0
+        
+        if self.response_type == 'classification':
+            lines.append(f"Training Misclassification Rate: {self.train_errors[opt_idx]:.4f}")
+            lines.append(f"Validation Misclassification Rate: {self.validation_errors[opt_idx]:.4f}")
+            if self.test_errors is not None:
+                lines.append(f"Test Misclassification Rate: {self.test_errors[opt_idx]:.4f}")
+        else:
+            lines.append(f"Training RMSE: {self.train_errors[opt_idx]:.4f}")
+            lines.append(f"Validation RMSE: {self.validation_errors[opt_idx]:.4f}")
+            if self.test_errors is not None:
+                lines.append(f"Test RMSE: {self.test_errors[opt_idx]:.4f}")
+        
+        lines.append("")
+        lines.append("-" * 70)
+        lines.append("Performance Summary by K")
+        lines.append("-" * 70)
+        lines.append(self.summary_table.to_string())
+        
+        if self.response_type == 'classification' and self.confusion_matrix is not None:
+            lines.append("")
+            lines.append("-" * 70)
+            lines.append(f"Confusion Matrix (K = {self.optimal_k})")
+            lines.append("-" * 70)
+            lines.append(self.confusion_matrix.to_string())
+            lines.append("")
+            lines.append("Confusion Rates:")
+            lines.append(self.confusion_rates.to_string())
+        
+        return "\n".join(lines)
+    
+    def predict(self, X_new: pd.DataFrame) -> pd.Series:
+        """Make predictions on new data."""
+        X_scaled = self.scaler.transform(X_new[self.feature_names])
+        preds = self.model.predict(X_scaled)
+        return pd.Series(preds, index=X_new.index, name='Predicted')
+    
+    def predict_proba(self, X_new: pd.DataFrame) -> pd.DataFrame:
+        """Get class probabilities for new data (classification only)."""
+        if self.response_type != 'classification':
+            raise ValueError("predict_proba only available for classification")
+        X_scaled = self.scaler.transform(X_new[self.feature_names])
+        probs = self.model.predict_proba(X_scaled)
+        return pd.DataFrame(probs, index=X_new.index, columns=self.classes)
+
+
+def k_nearest_neighbors(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray],
+    validation_portion: float = 0.3,
+    validation_column: Optional[pd.Series] = None,
+    k_range: Optional[range] = None,
+    max_k: int = 20,
+    metric: str = 'euclidean',
+    weights: str = 'uniform',
+    random_state: Optional[int] = None,
+    plot: bool = True,
+    figsize: Tuple[int, int] = (12, 5)
+) -> KNNResult:
+    """
+    K Nearest Neighbors analysis (JMP-style).
+    
+    Performs KNN classification or regression with automatic K selection
+    based on validation data performance, replicating JMP's K Nearest 
+    Neighbors platform (Analyze > Predictive Modeling > K Nearest Neighbors).
+    
+    Parameters
+    ----------
+    y : pd.Series or np.ndarray
+        Response variable. Categorical for classification, continuous for regression.
+    X : pd.DataFrame or np.ndarray
+        Predictor variables (factors).
+    validation_portion : float, default=0.3
+        Proportion of data to use for validation (ignored if validation_column provided).
+    validation_column : pd.Series, optional
+        Column indicating train/validation/test split.
+        Values: 0 or 'Training' = train, 1 or 'Validation' = validation, 
+                2 or 'Test' = test
+    k_range : range, optional
+        Range of K values to evaluate. Default is range(1, max_k+1).
+    max_k : int, default=20
+        Maximum K to evaluate if k_range not specified.
+    metric : str, default='euclidean'
+        Distance metric. Options: 'euclidean', 'manhattan', 'minkowski'.
+    weights : str, default='uniform'
+        Weight function. 'uniform' = all neighbors weighted equally,
+        'distance' = closer neighbors have more influence.
+    random_state : int, optional
+        Random seed for reproducibility.
+    plot : bool, default=True
+        Whether to display the K selection plot.
+    figsize : tuple, default=(12, 5)
+        Figure size for plots.
+        
+    Returns
+    -------
+    KNNResult
+        Object containing all KNN analysis results including:
+        - optimal_k: Best K based on validation error
+        - confusion_matrix: For classification tasks
+        - summary_table: Performance across all K values
+        - model: Fitted model for predictions
+        
+    Examples
+    --------
+    >>> # Classification
+    >>> result = k_nearest_neighbors(df['Risk'], df[['Income', 'Age', 'Credit']])
+    >>> print(result)
+    >>> print(f"Optimal K: {result.optimal_k}")
+    >>> print(result.confusion_matrix)
+    
+    >>> # Regression
+    >>> result = k_nearest_neighbors(df['Price'], df[['Size', 'Rooms', 'Age']])
+    >>> print(f"Optimal K: {result.optimal_k}")
+    >>> print(f"Validation RMSE: {result.validation_errors[result.optimal_k-1]:.4f}")
+    
+    >>> # With validation column (JMP-style)
+    >>> result = k_nearest_neighbors(
+    ...     df['Response'], df[predictors],
+    ...     validation_column=df['Validation']
+    ... )
+    
+    >>> # Make predictions on new data
+    >>> new_preds = result.predict(new_data)
+    >>> probs = result.predict_proba(new_data)  # classification only
+    
+    Notes
+    -----
+    - Features are automatically standardized (critical for KNN)
+    - Optimal K is selected based on validation error (not training error)
+    - Classification uses misclassification rate, regression uses RMSE
+    - Use validation_column for JMP-style train/validation/test splits
+    """
+    if not HAS_SKLEARN:
+        raise ImportError("sklearn is required for KNN. Install with: pip install scikit-learn")
+    
+    # Convert to pandas if needed
+    if isinstance(y, np.ndarray):
+        y = pd.Series(y, name='Response')
+    if isinstance(X, np.ndarray):
+        X = pd.DataFrame(X, columns=[f'X{i+1}' for i in range(X.shape[1])])
+    
+    # Get feature names
+    feature_names = list(X.columns)
+    
+    # Determine response type
+    if y.dtype == 'object' or y.dtype.name == 'category' or y.nunique() <= 10:
+        response_type = 'classification'
+        classes = np.sort(y.unique())
+    else:
+        response_type = 'regression'
+        classes = None
+    
+    # Handle train/validation/test split
+    if validation_column is not None:
+        val_col = validation_column.copy()
+        if val_col.dtype == 'object':
+            val_col = val_col.str.lower()
+            train_mask = val_col.isin(['training', 'train', '0'])
+            val_mask = val_col.isin(['validation', 'validate', '1'])
+            test_mask = val_col.isin(['test', '2'])
+        else:
+            train_mask = val_col == 0
+            val_mask = val_col == 1
+            test_mask = val_col == 2
+        
+        X_train = X[train_mask].copy()
+        y_train = y[train_mask].copy()
+        X_val = X[val_mask].copy()
+        y_val = y[val_mask].copy()
+        
+        if test_mask.sum() > 0:
+            X_test = X[test_mask].copy()
+            y_test = y[test_mask].copy()
+            has_test = True
+        else:
+            X_test, y_test, has_test = None, None, False
+    else:
+        if random_state is None:
+            random_state = 42
+        X_train, X_val, y_train, y_val = sklearn_train_test_split(
+            X, y, test_size=validation_portion, random_state=random_state,
+            stratify=y if response_type == 'classification' else None
+        )
+        X_test, y_test, has_test = None, None, False
+    
+    # Standardize features (critical for KNN)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    if has_test:
+        X_test_scaled = scaler.transform(X_test)
+    
+    # Set K range
+    if k_range is None:
+        max_k = min(max_k, len(X_train) - 1)
+        k_range = range(1, max_k + 1)
+    
+    k_values = np.array(list(k_range))
+    
+    # Evaluate across K values
+    train_errors, val_errors = [], []
+    test_errors = [] if has_test else None
+    
+    for k in k_values:
+        if response_type == 'classification':
+            model = KNeighborsClassifier(n_neighbors=k, metric=metric, weights=weights)
+            model.fit(X_train_scaled, y_train)
+            train_errors.append(np.mean(model.predict(X_train_scaled) != y_train))
+            val_errors.append(np.mean(model.predict(X_val_scaled) != y_val))
+            if has_test:
+                test_errors.append(np.mean(model.predict(X_test_scaled) != y_test))
+        else:
+            model = KNeighborsRegressor(n_neighbors=k, metric=metric, weights=weights)
+            model.fit(X_train_scaled, y_train)
+            train_errors.append(np.sqrt(np.mean((model.predict(X_train_scaled) - y_train) ** 2)))
+            val_errors.append(np.sqrt(np.mean((model.predict(X_val_scaled) - y_val) ** 2)))
+            if has_test:
+                test_errors.append(np.sqrt(np.mean((model.predict(X_test_scaled) - y_test) ** 2)))
+    
+    train_errors = np.array(train_errors)
+    val_errors = np.array(val_errors)
+    if has_test:
+        test_errors = np.array(test_errors)
+    
+    # Find optimal K (minimum validation error)
+    optimal_idx = np.argmin(val_errors)
+    optimal_k = k_values[optimal_idx]
+    
+    # Fit final model with optimal K
+    if response_type == 'classification':
+        final_model = KNeighborsClassifier(n_neighbors=optimal_k, metric=metric, weights=weights)
+    else:
+        final_model = KNeighborsRegressor(n_neighbors=optimal_k, metric=metric, weights=weights)
+    final_model.fit(X_train_scaled, y_train)
+    
+    # Predictions at optimal K
+    val_predictions = pd.Series(final_model.predict(X_val_scaled), index=X_val.index, name='Predicted')
+    
+    if response_type == 'classification':
+        val_probabilities = pd.DataFrame(
+            final_model.predict_proba(X_val_scaled), index=X_val.index, columns=classes
+        )
+        # Confusion matrix
+        conf_matrix = pd.crosstab(y_val, val_predictions, rownames=['Actual'], colnames=['Predicted'])
+        for cls in classes:
+            if cls not in conf_matrix.index:
+                conf_matrix.loc[cls] = 0
+            if cls not in conf_matrix.columns:
+                conf_matrix[cls] = 0
+        conf_matrix = conf_matrix.loc[classes, classes]
+        
+        # Confusion rates (misclassification by class)
+        rates_data = []
+        for cls in classes:
+            actual_count = (y_val == cls).sum()
+            if actual_count > 0:
+                correct = conf_matrix.loc[cls, cls]
+                incorrect = actual_count - correct
+                rates_data.append({
+                    'Actual': cls, 'Count': actual_count, 'Correct': correct,
+                    'Incorrect': incorrect, 'Correct Rate': correct / actual_count,
+                    'Misclassification Rate': incorrect / actual_count
+                })
+        confusion_rates = pd.DataFrame(rates_data)
+    else:
+        val_probabilities, conf_matrix, confusion_rates = None, None, None
+    
+    # Summary table
+    summary_data = {'K': k_values, 'Training': train_errors, 'Validation': val_errors}
+    if has_test:
+        summary_data['Test'] = test_errors
+    summary_table = pd.DataFrame(summary_data)
+    if response_type == 'classification':
+        summary_table.columns = ['K', 'Train Misclass Rate', 'Valid Misclass Rate'] + \
+                               (['Test Misclass Rate'] if has_test else [])
+    else:
+        summary_table.columns = ['K', 'Train RMSE', 'Valid RMSE'] + \
+                               (['Test RMSE'] if has_test else [])
+    
+    # Create result object
+    result = KNNResult(
+        response_type=response_type, optimal_k=optimal_k, k_values=k_values,
+        train_errors=train_errors, validation_errors=val_errors, test_errors=test_errors,
+        confusion_matrix=conf_matrix, confusion_rates=confusion_rates,
+        model=final_model, scaler=scaler, predictions=val_predictions,
+        probabilities=val_probabilities, feature_names=feature_names,
+        classes=classes, summary_table=summary_table
+    )
+    result.X_train_scaled = X_train_scaled
+    result.y_train = np.array(y_train)
+    
+    if plot and HAS_MATPLOTLIB:
+        plot_knn_results(result, figsize=figsize)
+    
+    return result
+
+
+def plot_knn_results(result: KNNResult, figsize: Tuple[int, int] = (12, 5)) -> Optional[Any]:
+    """
+    Plot K Nearest Neighbors results (JMP-style).
+    
+    Creates plots showing error rates across K values and confusion matrix.
+    
+    Parameters
+    ----------
+    result : KNNResult
+        Results from k_nearest_neighbors()
+    figsize : tuple, default=(12, 5)
+        Figure size
+        
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    n_plots = 2 if result.response_type == 'classification' and result.confusion_matrix is not None else 1
+    fig, axes = plt.subplots(1, n_plots, figsize=figsize)
+    if n_plots == 1:
+        axes = [axes]
+    
+    # Plot 1: Error rates vs K
+    ax1 = axes[0]
+    ax1.plot(result.k_values, result.train_errors, 'b-o', label='Training', markersize=5, linewidth=1.5)
+    ax1.plot(result.k_values, result.validation_errors, 'r-s', label='Validation', markersize=5, linewidth=1.5)
+    if result.test_errors is not None:
+        ax1.plot(result.k_values, result.test_errors, 'g-^', label='Test', markersize=5, linewidth=1.5)
+    
+    # Mark optimal K
+    opt_idx = list(result.k_values).index(result.optimal_k) if result.optimal_k in result.k_values else 0
+    ax1.axvline(x=result.optimal_k, color='gray', linestyle='--', alpha=0.7, label=f'Optimal K = {result.optimal_k}')
+    ax1.scatter([result.optimal_k], [result.validation_errors[opt_idx]], 
+                s=150, c='red', marker='*', zorder=5, edgecolors='black')
+    
+    ylabel = 'Misclassification Rate' if result.response_type == 'classification' else 'RMSE'
+    ax1.set_ylabel(ylabel, fontsize=11)
+    ax1.set_xlabel('Number of Neighbors (K)', fontsize=11)
+    ax1.set_title(f'K Nearest Neighbors - {ylabel} by K', fontsize=12)
+    ax1.legend(loc='best', fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Confusion matrix (classification only)
+    if result.response_type == 'classification' and n_plots > 1:
+        ax2 = axes[1]
+        conf_normalized = result.confusion_matrix.div(
+            result.confusion_matrix.sum(axis=1), axis=0
+        ).fillna(0)
+        im = ax2.imshow(conf_normalized.values, cmap='Blues', aspect='auto')
+        
+        for i in range(len(result.classes)):
+            for j in range(len(result.classes)):
+                count = result.confusion_matrix.iloc[i, j]
+                pct = conf_normalized.iloc[i, j] * 100
+                color = 'white' if conf_normalized.iloc[i, j] > 0.5 else 'black'
+                ax2.text(j, i, f'{count}\n({pct:.1f}%)', ha='center', va='center', 
+                        color=color, fontsize=9)
+        
+        ax2.set_xticks(range(len(result.classes)))
+        ax2.set_yticks(range(len(result.classes)))
+        ax2.set_xticklabels(result.classes, fontsize=10)
+        ax2.set_yticklabels(result.classes, fontsize=10)
+        ax2.set_xlabel('Predicted', fontsize=11)
+        ax2.set_ylabel('Actual', fontsize=11)
+        ax2.set_title(f'Confusion Matrix (K = {result.optimal_k})', fontsize=12)
+        plt.colorbar(im, ax=ax2, label='Proportion')
+    
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
+def knn_classification(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray],
+    validation_portion: float = 0.3,
+    validation_column: Optional[pd.Series] = None,
+    k_range: Optional[range] = None,
+    max_k: int = 20,
+    metric: str = 'euclidean',
+    weights: str = 'uniform',
+    random_state: Optional[int] = None,
+    plot: bool = True
+) -> KNNResult:
+    """
+    K Nearest Neighbors Classification (JMP-style).
+    
+    Convenience wrapper for k_nearest_neighbors() for classification tasks.
+    
+    Parameters
+    ----------
+    y : pd.Series or np.ndarray
+        Categorical response variable
+    X : pd.DataFrame or np.ndarray
+        Predictor variables
+    validation_portion : float, default=0.3
+        Proportion for validation
+    validation_column : pd.Series, optional
+        Column indicating train/validation/test
+    k_range : range, optional
+        Range of K values to evaluate
+    max_k : int, default=20
+        Maximum K to evaluate
+    metric : str, default='euclidean'
+        Distance metric
+    weights : str, default='uniform'
+        Weight function
+    random_state : int, optional
+        Random seed
+    plot : bool, default=True
+        Whether to display plots
+        
+    Returns
+    -------
+    KNNResult
+        Classification results
+        
+    Examples
+    --------
+    >>> result = knn_classification(df['Risk'], df[['Income', 'Age']])
+    >>> print(f"Optimal K: {result.optimal_k}")
+    >>> print(result.confusion_matrix)
+    """
+    return k_nearest_neighbors(
+        y=y, X=X, validation_portion=validation_portion,
+        validation_column=validation_column, k_range=k_range, max_k=max_k,
+        metric=metric, weights=weights, random_state=random_state, plot=plot
+    )
+
+
+def knn_regression(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray],
+    validation_portion: float = 0.3,
+    validation_column: Optional[pd.Series] = None,
+    k_range: Optional[range] = None,
+    max_k: int = 20,
+    metric: str = 'euclidean',
+    weights: str = 'distance',
+    random_state: Optional[int] = None,
+    plot: bool = True
+) -> KNNResult:
+    """
+    K Nearest Neighbors Regression (JMP-style).
+    
+    Convenience wrapper for k_nearest_neighbors() for regression tasks.
+    
+    Parameters
+    ----------
+    y : pd.Series or np.ndarray
+        Continuous response variable
+    X : pd.DataFrame or np.ndarray
+        Predictor variables
+    validation_portion : float, default=0.3
+        Proportion for validation
+    validation_column : pd.Series, optional
+        Column indicating train/validation/test
+    k_range : range, optional
+        Range of K values to evaluate
+    max_k : int, default=20
+        Maximum K to evaluate
+    metric : str, default='euclidean'
+        Distance metric
+    weights : str, default='distance'
+        Weight function (default 'distance' for regression)
+    random_state : int, optional
+        Random seed
+    plot : bool, default=True
+        Whether to display plots
+        
+    Returns
+    -------
+    KNNResult
+        Regression results
+        
+    Examples
+    --------
+    >>> result = knn_regression(df['Price'], df[['Size', 'Rooms']])
+    >>> print(f"Optimal K: {result.optimal_k}")
+    >>> print(f"Validation RMSE: {result.validation_errors[result.optimal_k-1]:.4f}")
+    """
+    return k_nearest_neighbors(
+        y=y, X=X, validation_portion=validation_portion,
+        validation_column=validation_column, k_range=k_range, max_k=max_k,
+        metric=metric, weights=weights, random_state=random_state, plot=plot
+    )
+
+
+def save_knn_predictions(
+    result: KNNResult,
+    X: pd.DataFrame,
+    y: Optional[pd.Series] = None
+) -> pd.DataFrame:
+    """
+    Save KNN predictions to a DataFrame (like JMP's Save Predicteds).
+    
+    Parameters
+    ----------
+    result : KNNResult
+        Fitted KNN result from k_nearest_neighbors()
+    X : pd.DataFrame
+        Data to predict on (must have same columns as training data)
+    y : pd.Series, optional
+        Actual values (for computing residuals/accuracy)
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with predictions, probabilities, and optionally residuals
+        
+    Examples
+    --------
+    >>> result = k_nearest_neighbors(df['y'], df[predictors])
+    >>> predictions_df = save_knn_predictions(result, df[predictors], df['y'])
+    >>> print(predictions_df.head())
+    """
+    X_scaled = result.scaler.transform(X[result.feature_names])
+    predictions = result.model.predict(X_scaled)
+    
+    output = pd.DataFrame(index=X.index)
+    output['Predicted'] = predictions
+    
+    if result.response_type == 'classification':
+        probs = result.model.predict_proba(X_scaled)
+        for i, cls in enumerate(result.classes):
+            output[f'Prob[{cls}]'] = probs[:, i]
+        output['Most Likely'] = predictions
+        if y is not None:
+            output['Actual'] = y.values
+            output['Correct'] = (predictions == y.values).astype(int)
+    else:
+        if y is not None:
+            output['Actual'] = y.values
+            output['Residual'] = y.values - predictions
+    
+    return output
+
+
+def knn_lift_curve(
+    result: KNNResult,
+    y_actual: pd.Series,
+    positive_class: Optional[str] = None,
+    n_deciles: int = 10,
+    plot: bool = True
+) -> pd.DataFrame:
+    """
+    Create lift curve for KNN classification (JMP-style).
+    
+    Parameters
+    ----------
+    result : KNNResult
+        Fitted KNN classification result
+    y_actual : pd.Series
+        Actual class labels for validation set
+    positive_class : str, optional
+        The positive class to measure lift for.
+        Defaults to the last class alphabetically.
+    n_deciles : int, default=10
+        Number of deciles for lift calculation
+    plot : bool, default=True
+        Whether to display lift curve
+        
+    Returns
+    -------
+    pd.DataFrame
+        Lift curve data by decile
+        
+    Examples
+    --------
+    >>> result = k_nearest_neighbors(df['Risk'], df[predictors])
+    >>> lift_data = knn_lift_curve(result, y_val, positive_class='Bad')
+    >>> print(lift_data)
+    """
+    if result.response_type != 'classification':
+        raise ValueError("Lift curves only available for classification")
+    if positive_class is None:
+        positive_class = result.classes[-1]
+    if result.probabilities is None:
+        raise ValueError("Probabilities not available")
+    
+    probs = result.probabilities[positive_class].values
+    actual = (y_actual == positive_class).astype(int).values
+    sorted_idx = np.argsort(-probs)
+    actual_sorted = actual[sorted_idx]
+    
+    n = len(actual)
+    decile_size = n // n_deciles
+    lift_data = []
+    cumulative_positives = 0
+    baseline_rate = actual.mean()
+    
+    for i in range(n_deciles):
+        start = i * decile_size
+        end = (i + 1) * decile_size if i < n_deciles - 1 else n
+        decile_positives = actual_sorted[start:end].sum()
+        cumulative_positives += decile_positives
+        decile_rate = decile_positives / (end - start)
+        cumulative_rate = cumulative_positives / end
+        lift_data.append({
+            'Decile': i + 1,
+            'Decile_Positive_Rate': decile_rate,
+            'Cumulative_Positive_Rate': cumulative_rate,
+            'Decile_Lift': decile_rate / baseline_rate if baseline_rate > 0 else 0,
+            'Cumulative_Lift': cumulative_rate / baseline_rate if baseline_rate > 0 else 0,
+            'Cumulative_Pct_Population': (i + 1) / n_deciles * 100,
+            'Cumulative_Pct_Positives': cumulative_positives / actual.sum() * 100 if actual.sum() > 0 else 0
+        })
+    
+    lift_df = pd.DataFrame(lift_data)
+    
+    if plot and HAS_MATPLOTLIB:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        ax1, ax2 = axes
+        
+        ax1.plot(lift_df['Decile'], lift_df['Cumulative_Lift'], 'b-o', 
+                 linewidth=2, markersize=8, label='Model')
+        ax1.axhline(y=1, color='gray', linestyle='--', label='Baseline')
+        ax1.set_xlabel('Decile', fontsize=11)
+        ax1.set_ylabel('Cumulative Lift', fontsize=11)
+        ax1.set_title('Lift Curve', fontsize=12)
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        ax1.set_xticks(range(1, n_deciles + 1))
+        
+        ax2.plot(lift_df['Cumulative_Pct_Population'], 
+                 lift_df['Cumulative_Pct_Positives'], 'b-o',
+                 linewidth=2, markersize=8, label='Model')
+        ax2.plot([0, 100], [0, 100], 'gray', linestyle='--', label='Baseline')
+        ax2.set_xlabel('% Population', fontsize=11)
+        ax2.set_ylabel(f'% {positive_class} Captured', fontsize=11)
+        ax2.set_title('Cumulative Gains Chart', fontsize=12)
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+    
+    return lift_df
+
+
+# =============================================================================
 # MODULE EXPORTS
 # =============================================================================
 
-__version__ = "2.1.0"
+__version__ = "2.5.0"
 __all__ = [
     # Data classes
     'DescriptiveStats', 'NormalityTest', 'RegressionResults', 'ResidualDiagnostics',
@@ -6853,6 +7986,13 @@ __all__ = [
     'arima', 'exponential_smoothing', 'autocorrelation_analysis',
     'seasonal_decomposition', 'time_series_forecast', 'plot_time_series_diagnostics',
     'adf_test', 'kpss_test', 'ljung_box_test', 'plot_acf_pacf',
+    
+    # NEW v2.5.0: K Nearest Neighbors
+    'KNNResult', 'k_nearest_neighbors', 'knn_classification', 'knn_regression',
+    'plot_knn_results', 'save_knn_predictions', 'knn_lift_curve',
+    
+    # NEW v2.5.0: Bootstrap Methods
+    'BootstrapResults', 'bootstrap', 'bootstrap_rmse', 'plot_bootstrap_distribution',
     
     # Utilities
     'detect_outliers', 'recode', 'log_transform',
