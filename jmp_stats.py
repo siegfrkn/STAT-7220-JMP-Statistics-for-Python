@@ -26,6 +26,14 @@ NEW IN v2.5.0:
         - bootstrap_rmse(): Bootstrap confidence interval for RMSE
         - plot_bootstrap_distribution(): Visualize bootstrap distribution
         - Supports percentile, basic, and BCa confidence intervals
+    
+    - LOGISTIC REGRESSION (JMP's Fit Y by X / Fit Model with categorical Y):
+        - logistic_regression(): Binary logistic regression with full output
+        - Coefficients, odds ratios, confidence intervals
+        - Confusion matrix and misclassification rate
+        - plot_logistic_roc(): ROC curve with AUC
+        - roc_curve(): Standalone ROC curve calculation
+        - confusion_matrix_stats(): Classification metrics (accuracy, sensitivity, specificity, F1)
 
 NEW IN v2.3:
     - ENHANCED LINEAR REGRESSION:
@@ -6817,6 +6825,1134 @@ def plot_acf_pacf(
 
 
 # =============================================================================
+# LOGISTIC REGRESSION - JMP Style (Added v2.5.0)
+# =============================================================================
+
+@dataclass
+class LogisticRegressionResults:
+    """
+    Results container for Logistic Regression (JMP-style).
+    
+    Attributes
+    ----------
+    response_levels : list
+        Levels of the response variable
+    target_level : str
+        The level being modeled (probability of this level)
+    n_obs : int
+        Number of observations
+    converged : bool
+        Whether the model converged
+    
+    # Model Fit (JMP's "Whole Model Test")
+    log_likelihood : float
+        Log Likelihood of fitted model
+    null_log_likelihood : float
+        Log Likelihood of reduced (intercept-only) model
+    neg2_log_likelihood : float
+        -2 Log Likelihood (deviance)
+    likelihood_ratio_chisq : float
+        Likelihood Ratio Chi-Square (Full vs Reduced)
+    lr_df : int
+        Degrees of freedom for LRT
+    lr_pvalue : float
+        P-value for Likelihood Ratio test
+    aic : float
+        Akaike Information Criterion
+    bic : float
+        Bayesian Information Criterion
+    rsquare_u : float
+        McFadden's R² (entropy R²)
+    
+    # Effect Tests (JMP's "Effect Likelihood Ratio Tests")
+    effect_tests : pd.DataFrame
+        LRT for each predictor individually
+    
+    # Lack of Fit (Hosmer-Lemeshow)
+    hosmer_lemeshow : dict
+        Hosmer-Lemeshow goodness of fit test
+    
+    # Parameter estimates
+    coefficients : pd.DataFrame
+        Parameter estimates with SE, Chi-Square, p-values
+    odds_ratios : pd.DataFrame
+        Odds ratios with confidence intervals
+    
+    # Predictions (JMP-style)
+    linear_predictor : pd.Series
+        Lin[target_level] - the logit values
+    predicted_probs : pd.DataFrame
+        Prob[level] for each level
+    most_likely : pd.Series
+        Most Likely [response] - predicted category
+    
+    # Classification
+    confusion_matrix : pd.DataFrame
+        Confusion matrix (actual vs predicted)
+    misclassification_rate : float
+        Overall misclassification rate
+    sensitivity : float
+        True positive rate (recall)
+    specificity : float
+        True negative rate
+    auc : float
+        Area Under ROC Curve
+    
+    # Model object
+    model : object
+        Fitted statsmodels model
+    """
+    response_levels: list
+    target_level: str
+    other_level: str
+    n_obs: int
+    converged: bool
+    log_likelihood: float
+    null_log_likelihood: float
+    neg2_log_likelihood: float
+    likelihood_ratio_chisq: float
+    lr_df: int
+    lr_pvalue: float
+    aic: float
+    bic: float
+    rsquare_u: float
+    effect_tests: pd.DataFrame
+    hosmer_lemeshow: dict
+    coefficients: pd.DataFrame
+    odds_ratios: pd.DataFrame
+    linear_predictor: pd.Series
+    predicted_probs: pd.DataFrame
+    most_likely: pd.Series
+    confusion_matrix: pd.DataFrame
+    misclassification_rate: float
+    sensitivity: float
+    specificity: float
+    auc: float
+    model: object
+    X_design: pd.DataFrame = None
+    X_clean: pd.DataFrame = None
+    y_actual: pd.Series = None
+    y_binary: pd.Series = None
+    threshold: float = 0.5
+    feature_names: list = None
+    
+    def __repr__(self):
+        lines = []
+        lines.append("=" * 70)
+        lines.append("Logistic Regression Results")
+        lines.append("=" * 70)
+        lines.append(f"Response: {self.response_levels}")
+        lines.append(f"Target Level (Prob modeled): {self.target_level}")
+        lines.append(f"Observations: {self.n_obs}")
+        lines.append(f"Converged: {self.converged}")
+        lines.append("")
+        
+        lines.append("-" * 70)
+        lines.append("Whole Model Test")
+        lines.append("-" * 70)
+        lines.append(f"Model              -LogLikelihood    DF    ChiSquare    Prob>ChiSq")
+        lines.append(f"Difference         {(-self.log_likelihood + self.null_log_likelihood):14.4f}    {self.lr_df:2d}    {self.likelihood_ratio_chisq:10.4f}    {self.lr_pvalue:.6f}")
+        lines.append(f"Full               {-self.log_likelihood:14.4f}")
+        lines.append(f"Reduced            {-self.null_log_likelihood:14.4f}")
+        lines.append("")
+        lines.append(f"RSquare (U):          {self.rsquare_u:.4f}")
+        lines.append(f"AIC:                  {self.aic:.4f}")
+        lines.append(f"BIC:                  {self.bic:.4f}")
+        lines.append("")
+        
+        lines.append("-" * 70)
+        lines.append("Effect Likelihood Ratio Tests")
+        lines.append("-" * 70)
+        lines.append(self.effect_tests.to_string(index=False))
+        lines.append("")
+        
+        lines.append("-" * 70)
+        lines.append("Parameter Estimates")
+        lines.append("-" * 70)
+        lines.append(self.coefficients.to_string(index=False))
+        lines.append("")
+        
+        if len(self.odds_ratios) > 0:
+            lines.append("-" * 70)
+            lines.append("Odds Ratios")
+            lines.append("-" * 70)
+            lines.append(self.odds_ratios.to_string(index=False))
+            lines.append("")
+        
+        lines.append("-" * 70)
+        lines.append("Lack of Fit (Hosmer-Lemeshow)")
+        lines.append("-" * 70)
+        lines.append(f"ChiSquare:    {self.hosmer_lemeshow['chi_square']:.4f}")
+        lines.append(f"DF:           {self.hosmer_lemeshow['df']}")
+        lines.append(f"Prob>ChiSq:   {self.hosmer_lemeshow['p_value']:.4f}")
+        lines.append("")
+        
+        lines.append("-" * 70)
+        lines.append(f"Confusion Matrix (Threshold = {self.threshold})")
+        lines.append("-" * 70)
+        lines.append(self.confusion_matrix.to_string())
+        lines.append("")
+        lines.append(f"Misclassification Rate: {self.misclassification_rate:.4f}")
+        lines.append(f"Sensitivity (TPR):      {self.sensitivity:.4f}")
+        lines.append(f"Specificity (TNR):      {self.specificity:.4f}")
+        lines.append(f"AUC:                    {self.auc:.4f}")
+        
+        return "\n".join(lines)
+    
+    def predict(self, X_new: pd.DataFrame) -> pd.Series:
+        """Predict most likely class labels for new data (JMP's Most Likely)."""
+        probs_df = self.predict_proba(X_new)
+        # Get column with max probability
+        most_likely = probs_df.idxmax(axis=1).str.replace(r'Prob\[|\]', '', regex=True)
+        return pd.Series(most_likely.values, index=X_new.index, name='Most Likely')
+    
+    def predict_proba(self, X_new: pd.DataFrame) -> pd.DataFrame:
+        """Predict probabilities for each level (JMP-style Prob[level] columns)."""
+        X_with_const = sm.add_constant(X_new[self.feature_names], has_constant='add')
+        prob_target = self.model.predict(X_with_const)
+        prob_other = 1 - prob_target
+        
+        probs = pd.DataFrame({
+            f'Prob[{self.other_level}]': prob_other,
+            f'Prob[{self.target_level}]': prob_target
+        }, index=X_new.index)
+        return probs
+    
+    def predict_linear(self, X_new: pd.DataFrame) -> pd.Series:
+        """Get linear predictor (logit) for new data (JMP's Lin[level])."""
+        X_with_const = sm.add_constant(X_new[self.feature_names], has_constant='add')
+        # Linear predictor = X @ beta
+        lin_pred = X_with_const @ self.model.params
+        return pd.Series(lin_pred.values, index=X_new.index, name=f'Lin[{self.target_level}]')
+    
+    def plot(self, figsize: Tuple[int, int] = (15, 10)) -> None:
+        """Display all JMP-style diagnostic plots."""
+        plot_logistic_diagnostics(self, figsize=figsize)
+
+
+def _hosmer_lemeshow_test(y_true: np.ndarray, y_prob: np.ndarray, n_groups: int = 10) -> Dict[str, float]:
+    """
+    Hosmer-Lemeshow goodness of fit test for logistic regression.
+    
+    Parameters
+    ----------
+    y_true : array
+        Actual binary outcomes (0/1)
+    y_prob : array
+        Predicted probabilities
+    n_groups : int, default=10
+        Number of groups (deciles)
+        
+    Returns
+    -------
+    dict
+        Contains 'chi_square', 'df', 'p_value'
+    """
+    # Ensure numpy arrays
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+    
+    # Sort by predicted probability and create groups
+    order = np.argsort(y_prob)
+    y_true_sorted = y_true[order]
+    y_prob_sorted = y_prob[order]
+    
+    # Create decile groups
+    groups = np.array_split(np.arange(len(y_true)), n_groups)
+    
+    chi_sq = 0
+    n_valid_groups = 0
+    
+    for group_idx in groups:
+        if len(group_idx) == 0:
+            continue
+            
+        n_g = len(group_idx)
+        obs_1 = y_true_sorted[group_idx].sum()
+        obs_0 = n_g - obs_1
+        exp_1 = y_prob_sorted[group_idx].sum()
+        exp_0 = n_g - exp_1
+        
+        # Avoid division by zero
+        if exp_1 > 0 and exp_0 > 0:
+            chi_sq += (obs_1 - exp_1)**2 / exp_1 + (obs_0 - exp_0)**2 / exp_0
+            n_valid_groups += 1
+    
+    df = max(n_valid_groups - 2, 1)
+    p_value = 1 - chi2.cdf(chi_sq, df)
+    
+    return {
+        'chi_square': chi_sq,
+        'df': df,
+        'p_value': p_value,
+        'n_groups': n_valid_groups
+    }
+
+
+def _calculate_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """Calculate Area Under ROC Curve."""
+    # Sort by probability descending
+    order = np.argsort(-y_prob)
+    y_true_sorted = y_true[order]
+    
+    n_pos = y_true.sum()
+    n_neg = len(y_true) - n_pos
+    
+    if n_pos == 0 or n_neg == 0:
+        return 0.5
+    
+    # Count pairs where positive ranked higher than negative
+    tps = np.cumsum(y_true_sorted)
+    fps = np.cumsum(1 - y_true_sorted)
+    
+    # Trapezoidal rule
+    tpr = tps / n_pos
+    fpr = fps / n_neg
+    
+    auc = np.trapz(tpr, fpr)
+    return abs(auc)  # Ensure positive
+
+
+def logistic_regression(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray],
+    target_level: Optional[str] = None,
+    threshold: float = 0.5,
+    add_constant: bool = True,
+    alpha: float = 0.05,
+    max_iter: int = 100,
+    plot: bool = True,
+    figsize: Tuple[int, int] = (15, 10)
+) -> LogisticRegressionResults:
+    """
+    Logistic Regression (JMP-style).
+    
+    Performs binary logistic regression replicating JMP's 
+    Analyze > Fit Y by X (with categorical Y) or Fit Model with 
+    Nominal/Ordinal response.
+    
+    Parameters
+    ----------
+    y : pd.Series or np.ndarray
+        Binary response variable (categorical or 0/1)
+    X : pd.DataFrame or np.ndarray
+        Predictor variables
+    target_level : str, optional
+        The level to model probability for. Default is the last level
+        alphabetically (JMP default) or 1 for numeric.
+    threshold : float, default=0.5
+        Classification threshold for predicted probabilities
+    add_constant : bool, default=True
+        Whether to add intercept term
+    alpha : float, default=0.05
+        Significance level for confidence intervals
+    max_iter : int, default=100
+        Maximum iterations for convergence
+    plot : bool, default=True
+        Whether to display ROC curve
+    figsize : tuple, default=(12, 5)
+        Figure size for plots
+        
+    Returns
+    -------
+    LogisticRegressionResults
+        Object containing all logistic regression results including:
+        - log_likelihood: Log Likelihood of full model
+        - null_log_likelihood: Log Likelihood of reduced model
+        - likelihood_ratio_chisq: LR Chi-Square test
+        - coefficients: Parameter estimates table
+        - odds_ratios: Odds ratios with CIs
+        - linear_predictor: Lin[level] values (logit)
+        - predicted_probs: Prob[level] for each level
+        - most_likely: Predicted category
+        - confusion_matrix: Classification results
+        
+    Examples
+    --------
+    >>> result = logistic_regression(df['Status'], df[['Schedule lag', 'Age']])
+    >>> print(result)
+    
+    >>> # Get JMP-style predictions
+    >>> print(result.predicted_probs.head())  # Prob[level] columns
+    >>> print(result.most_likely.head())      # Most Likely category
+    >>> print(result.linear_predictor.head()) # Lin[level] values
+    
+    >>> # Save predictions like JMP
+    >>> preds = save_logistic_predictions(result, df[['Schedule lag', 'Age']])
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels required. Install: pip install statsmodels")
+    
+    # Convert inputs
+    if isinstance(y, np.ndarray):
+        y = pd.Series(y, name='Response')
+    if isinstance(X, np.ndarray):
+        X = pd.DataFrame(X, columns=[f'X{i+1}' for i in range(X.shape[1])])
+    
+    # Get feature names
+    feature_names = list(X.columns)
+    
+    # Handle response variable
+    y_clean = y.copy()
+    response_levels = sorted(y_clean.dropna().unique())
+    
+    if len(response_levels) != 2:
+        raise ValueError(f"Logistic regression requires exactly 2 response levels, got {len(response_levels)}: {response_levels}")
+    
+    # Determine target level (JMP uses last alphabetically by default)
+    if target_level is None:
+        if y_clean.dtype in ['int64', 'float64'] and set(response_levels) <= {0, 1, 0.0, 1.0}:
+            target_level = 1
+        else:
+            target_level = response_levels[-1]  # Last alphabetically
+    
+    other_level = [l for l in response_levels if l != target_level][0]
+    
+    # Convert to binary (1 = target_level, 0 = other)
+    y_binary = (y_clean == target_level).astype(int)
+    
+    # Handle missing values
+    mask = ~(y_binary.isna() | X.isna().any(axis=1))
+    y_binary = y_binary[mask]
+    X_clean = X[mask].copy()
+    
+    n_obs = len(y_binary)
+    
+    # Add constant
+    if add_constant:
+        X_design = sm.add_constant(X_clean)
+    else:
+        X_design = X_clean
+    
+    # Fit logistic regression (Full Model)
+    model = sm.Logit(y_binary, X_design)
+    
+    try:
+        results = model.fit(disp=0, maxiter=max_iter)
+        converged = results.mle_retvals['converged']
+    except Exception as e:
+        raise RuntimeError(f"Model fitting failed: {e}")
+    
+    # Fit null model (Reduced Model - intercept only)
+    null_model = sm.Logit(y_binary, np.ones(n_obs))
+    null_results = null_model.fit(disp=0)
+    
+    # Model fit statistics
+    log_likelihood = results.llf
+    null_log_likelihood = null_results.llf
+    neg2_log_likelihood = -2 * log_likelihood
+    
+    # Likelihood Ratio Test
+    likelihood_ratio_chisq = -2 * (null_log_likelihood - log_likelihood)
+    lr_df = len(feature_names)  # degrees of freedom = number of predictors
+    lr_pvalue = 1 - chi2.cdf(likelihood_ratio_chisq, lr_df)
+    
+    aic = results.aic
+    bic = results.bic
+    
+    # McFadden's R² (entropy R²)
+    rsquare_u = 1 - (log_likelihood / null_log_likelihood) if null_log_likelihood != 0 else 0
+    
+    # ==========================================================================
+    # Effect Likelihood Ratio Tests (JMP's "Effect Likelihood Ratio Tests")
+    # Test each predictor by comparing full model to model without that predictor
+    # ==========================================================================
+    effect_test_data = []
+    for feature in feature_names:
+        # Fit reduced model without this feature
+        other_features = [f for f in feature_names if f != feature]
+        if other_features:
+            X_reduced = sm.add_constant(X_clean[other_features]) if add_constant else X_clean[other_features]
+        else:
+            X_reduced = np.ones(n_obs)
+        
+        reduced_model = sm.Logit(y_binary, X_reduced)
+        reduced_results = reduced_model.fit(disp=0, maxiter=max_iter)
+        
+        # LRT
+        lr_stat = -2 * (reduced_results.llf - log_likelihood)
+        effect_df = 1  # Each effect has 1 df for continuous predictors
+        effect_pvalue = 1 - chi2.cdf(lr_stat, effect_df)
+        
+        effect_test_data.append({
+            'Source': feature,
+            'Nparm': 1,
+            'DF': effect_df,
+            'L-R ChiSquare': lr_stat,
+            'Prob>ChiSq': effect_pvalue
+        })
+    
+    effect_tests_df = pd.DataFrame(effect_test_data)
+    
+    # ==========================================================================
+    # Hosmer-Lemeshow Lack of Fit Test
+    # ==========================================================================
+    prob_target_arr = results.predict(X_design)
+    hosmer_lemeshow = _hosmer_lemeshow_test(y_binary.values, prob_target_arr, n_groups=10)
+    
+    # Parameter estimates
+    params = results.params
+    std_errors = results.bse
+    z_values = results.tvalues
+    p_values = results.pvalues
+    conf_int = results.conf_int(alpha=alpha)
+    
+    coef_data = {
+        'Term': params.index.tolist(),
+        'Estimate': params.values,
+        'Std Error': std_errors.values,
+        'ChiSquare': z_values.values**2,
+        'Prob>ChiSq': p_values.values,
+        f'Lower {int((1-alpha)*100)}%': conf_int.iloc[:, 0].values,
+        f'Upper {int((1-alpha)*100)}%': conf_int.iloc[:, 1].values
+    }
+    coefficients_df = pd.DataFrame(coef_data)
+    
+    # Odds ratios (exclude intercept)
+    odds_data = []
+    for i, term in enumerate(params.index):
+        if term.lower() != 'const':
+            odds_data.append({
+                'Term': term,
+                'Odds Ratio': np.exp(params.iloc[i]),
+                f'Lower {int((1-alpha)*100)}%': np.exp(conf_int.iloc[i, 0]),
+                f'Upper {int((1-alpha)*100)}%': np.exp(conf_int.iloc[i, 1])
+            })
+    odds_ratios_df = pd.DataFrame(odds_data) if odds_data else pd.DataFrame()
+    
+    # JMP-style predictions
+    # Linear predictor (logit) - Lin[target_level]
+    linear_pred = pd.Series(
+        X_design @ params,
+        index=X_clean.index,
+        name=f'Lin[{target_level}]'
+    )
+    
+    # Probabilities for each level - Prob[level]
+    prob_target = pd.Series(results.predict(X_design), index=X_clean.index)
+    prob_other = 1 - prob_target
+    
+    predicted_probs = pd.DataFrame({
+        f'Prob[{other_level}]': prob_other,
+        f'Prob[{target_level}]': prob_target
+    }, index=X_clean.index)
+    
+    # Most Likely category
+    most_likely = pd.Series(
+        np.where(prob_target >= threshold, target_level, other_level),
+        index=X_clean.index,
+        name='Most Likely'
+    )
+    
+    # Confusion matrix
+    y_actual_labels = pd.Series(
+        np.where(y_binary == 1, target_level, other_level),
+        index=y_binary.index
+    )
+    conf_matrix = pd.crosstab(y_actual_labels, most_likely, 
+                              rownames=['Actual'], colnames=['Predicted'])
+    
+    # Ensure both levels are in confusion matrix
+    for level in response_levels:
+        if level not in conf_matrix.index:
+            conf_matrix.loc[level] = 0
+        if level not in conf_matrix.columns:
+            conf_matrix[level] = 0
+    conf_matrix = conf_matrix.loc[response_levels, response_levels]
+    
+    # Misclassification rate
+    misclass_rate = (most_likely.values != y_actual_labels.values).mean()
+    
+    # ==========================================================================
+    # Classification metrics
+    # ==========================================================================
+    y_pred_binary = (prob_target >= threshold).astype(int)
+    tp = ((y_pred_binary == 1) & (y_binary == 1)).sum()
+    tn = ((y_pred_binary == 0) & (y_binary == 0)).sum()
+    fp = ((y_pred_binary == 1) & (y_binary == 0)).sum()
+    fn = ((y_pred_binary == 0) & (y_binary == 1)).sum()
+    
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    
+    # AUC
+    auc = _calculate_auc(y_binary.values, prob_target.values)
+    
+    result = LogisticRegressionResults(
+        response_levels=response_levels,
+        target_level=target_level,
+        other_level=other_level,
+        n_obs=n_obs,
+        converged=converged,
+        log_likelihood=log_likelihood,
+        null_log_likelihood=null_log_likelihood,
+        neg2_log_likelihood=neg2_log_likelihood,
+        likelihood_ratio_chisq=likelihood_ratio_chisq,
+        lr_df=lr_df,
+        lr_pvalue=lr_pvalue,
+        aic=aic,
+        bic=bic,
+        rsquare_u=rsquare_u,
+        effect_tests=effect_tests_df,
+        hosmer_lemeshow=hosmer_lemeshow,
+        coefficients=coefficients_df,
+        odds_ratios=odds_ratios_df,
+        linear_predictor=linear_pred,
+        predicted_probs=predicted_probs,
+        most_likely=most_likely,
+        confusion_matrix=conf_matrix,
+        misclassification_rate=misclass_rate,
+        sensitivity=sensitivity,
+        specificity=specificity,
+        auc=auc,
+        model=results,
+        X_design=X_design,
+        X_clean=X_clean,
+        y_actual=y_actual_labels,
+        y_binary=y_binary,
+        threshold=threshold,
+        feature_names=feature_names
+    )
+    
+    if plot and HAS_MATPLOTLIB:
+        plot_logistic_diagnostics(result, figsize=figsize)
+    
+    return result
+
+
+def save_logistic_predictions(
+    result: LogisticRegressionResults,
+    X: pd.DataFrame,
+    include_linear: bool = True
+) -> pd.DataFrame:
+    """
+    Save logistic regression predictions (JMP's Save Probability Formula).
+    
+    Creates a DataFrame with JMP-style prediction columns:
+    - Lin[level]: Linear predictor (logit)
+    - Prob[level]: Probability for each level
+    - Most Likely: Predicted category
+    
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Fitted logistic regression result
+    X : pd.DataFrame
+        Predictor data
+    include_linear : bool, default=True
+        Whether to include the linear predictor column
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with prediction columns
+        
+    Examples
+    --------
+    >>> result = logistic_regression(df['Status'], df[['Schedule lag', 'Age']])
+    >>> preds = save_logistic_predictions(result, df[['Schedule lag', 'Age']])
+    >>> print(preds.head())
+    """
+    output = pd.DataFrame(index=X.index)
+    
+    # Linear predictor (logit)
+    if include_linear:
+        X_with_const = sm.add_constant(X[result.feature_names], has_constant='add')
+        lin_pred = X_with_const @ result.model.params
+        output[f'Lin[{result.target_level}]'] = lin_pred
+    
+    # Probabilities
+    probs = result.predict_proba(X)
+    output = pd.concat([output, probs], axis=1)
+    
+    # Most Likely
+    output['Most Likely'] = result.predict(X)
+    
+    return output
+
+
+def plot_logistic_diagnostics(
+    result: LogisticRegressionResults,
+    figsize: Tuple[int, int] = (15, 10)
+) -> Optional[Any]:
+    """
+    Plot all JMP-style diagnostic plots for logistic regression.
+    
+    Plots include:
+    1. Whole Model Test (bar chart)
+    2. ROC Curve with AUC
+    3. Lift Curve
+    4. Confusion Matrix heatmap
+    5. Calibration Plot (predicted vs actual)
+    6. Logistic Plot (S-curve) or Effect Tests bar chart
+    
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Results from logistic_regression()
+    figsize : tuple, default=(15, 10)
+        Figure size
+        
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    fig, axes = plt.subplots(2, 3, figsize=figsize)
+    
+    # ==========================================================================
+    # 1. Whole Model Test - Bar chart of -LogLikelihood
+    # ==========================================================================
+    ax1 = axes[0, 0]
+    models = ['Reduced\n(Intercept)', 'Full\n(Model)']
+    neg_ll = [-result.null_log_likelihood, -result.log_likelihood]
+    colors = ['#d62728', '#2ca02c']
+    bars = ax1.bar(models, neg_ll, color=colors, edgecolor='black', linewidth=1.2)
+    ax1.set_ylabel('-Log Likelihood', fontsize=11)
+    ax1.set_title(f'Whole Model Test\nLR χ² = {result.likelihood_ratio_chisq:.2f}, p = {result.lr_pvalue:.4f}', fontsize=11)
+    
+    # Add value labels on bars
+    for bar, val in zip(bars, neg_ll):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 1, 
+                f'{val:.1f}', ha='center', va='bottom', fontsize=10)
+    ax1.set_ylim(0, max(neg_ll) * 1.15)
+    
+    # ==========================================================================
+    # 2. ROC Curve
+    # ==========================================================================
+    ax2 = axes[0, 1]
+    y_true = result.y_binary.values
+    y_prob = result.predicted_probs[f'Prob[{result.target_level}]'].values
+    
+    thresholds = np.linspace(0, 1, 200)
+    tpr_list, fpr_list = [], []
+    
+    for thresh in thresholds:
+        y_pred = (y_prob >= thresh).astype(int)
+        tp = ((y_pred == 1) & (y_true == 1)).sum()
+        fn = ((y_pred == 0) & (y_true == 1)).sum()
+        fp = ((y_pred == 1) & (y_true == 0)).sum()
+        tn = ((y_pred == 0) & (y_true == 0)).sum()
+        
+        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+        tpr_list.append(tpr)
+        fpr_list.append(fpr)
+    
+    ax2.plot(fpr_list, tpr_list, 'b-', linewidth=2, label=f'ROC (AUC = {result.auc:.4f})')
+    ax2.plot([0, 1], [0, 1], 'r--', linewidth=1, label='Random')
+    ax2.fill_between(np.array(fpr_list)[np.argsort(fpr_list)], 
+                     np.array(tpr_list)[np.argsort(fpr_list)], alpha=0.3)
+    ax2.set_xlabel('1 - Specificity (FPR)', fontsize=11)
+    ax2.set_ylabel('Sensitivity (TPR)', fontsize=11)
+    ax2.set_title('ROC Curve', fontsize=11)
+    ax2.legend(loc='lower right')
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlim([0, 1])
+    ax2.set_ylim([0, 1])
+    
+    # ==========================================================================
+    # 3. Lift Curve
+    # ==========================================================================
+    ax3 = axes[0, 2]
+    
+    # Sort by predicted probability descending
+    order = np.argsort(-y_prob)
+    y_sorted = y_true[order]
+    
+    n = len(y_true)
+    n_pos = y_true.sum()
+    
+    # Cumulative response
+    cum_resp = np.cumsum(y_sorted)
+    pct_sample = np.arange(1, n + 1) / n
+    pct_resp = cum_resp / n_pos
+    
+    # Lift = actual / expected
+    lift = pct_resp / pct_sample
+    
+    ax3.plot(pct_sample * 100, lift, 'b-', linewidth=2, label='Model')
+    ax3.axhline(y=1, color='r', linestyle='--', linewidth=1, label='Random')
+    ax3.set_xlabel('% of Sample', fontsize=11)
+    ax3.set_ylabel('Lift', fontsize=11)
+    ax3.set_title('Lift Curve', fontsize=11)
+    ax3.legend(loc='upper right')
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xlim([0, 100])
+    
+    # ==========================================================================
+    # 4. Confusion Matrix Heatmap
+    # ==========================================================================
+    ax4 = axes[1, 0]
+    conf_matrix = result.confusion_matrix
+    conf_normalized = conf_matrix.div(conf_matrix.sum(axis=1), axis=0).fillna(0)
+    
+    im = ax4.imshow(conf_normalized.values, cmap='Blues', aspect='auto', vmin=0, vmax=1)
+    
+    for i in range(len(result.response_levels)):
+        for j in range(len(result.response_levels)):
+            count = conf_matrix.iloc[i, j]
+            pct = conf_normalized.iloc[i, j] * 100
+            color = 'white' if conf_normalized.iloc[i, j] > 0.5 else 'black'
+            ax4.text(j, i, f'{count}\n({pct:.1f}%)', ha='center', va='center', 
+                    color=color, fontsize=10)
+    
+    ax4.set_xticks(range(len(result.response_levels)))
+    ax4.set_yticks(range(len(result.response_levels)))
+    ax4.set_xticklabels(result.response_levels, fontsize=9)
+    ax4.set_yticklabels(result.response_levels, fontsize=9)
+    ax4.set_xlabel('Predicted', fontsize=11)
+    ax4.set_ylabel('Actual', fontsize=11)
+    ax4.set_title(f'Confusion Matrix (τ = {result.threshold})\nMisclass = {result.misclassification_rate:.2%}', fontsize=11)
+    
+    # ==========================================================================
+    # 5. Calibration Plot
+    # ==========================================================================
+    ax5 = axes[1, 1]
+    
+    # Bin predictions and calculate actual proportions
+    n_bins = 10
+    bins = np.linspace(0, 1, n_bins + 1)
+    bin_indices = np.digitize(y_prob, bins) - 1
+    bin_indices = np.clip(bin_indices, 0, n_bins - 1)
+    
+    bin_means_pred = []
+    bin_means_actual = []
+    bin_counts = []
+    
+    for i in range(n_bins):
+        mask = bin_indices == i
+        if mask.sum() > 0:
+            bin_means_pred.append(y_prob[mask].mean())
+            bin_means_actual.append(y_true[mask].mean())
+            bin_counts.append(mask.sum())
+    
+    if bin_means_pred:
+        # Size points by count
+        sizes = np.array(bin_counts) / max(bin_counts) * 200 + 50
+        ax5.scatter(bin_means_pred, bin_means_actual, s=sizes, alpha=0.7, edgecolors='black')
+    
+    ax5.plot([0, 1], [0, 1], 'r--', linewidth=1, label='Perfect calibration')
+    ax5.set_xlabel('Mean Predicted Probability', fontsize=11)
+    ax5.set_ylabel('Observed Proportion', fontsize=11)
+    ax5.set_title(f'Calibration Plot\nH-L p = {result.hosmer_lemeshow["p_value"]:.4f}', fontsize=11)
+    ax5.legend(loc='lower right')
+    ax5.grid(True, alpha=0.3)
+    ax5.set_xlim([0, 1])
+    ax5.set_ylim([0, 1])
+    
+    # ==========================================================================
+    # 6. Logistic Plot (S-curve) - only if single predictor, else Effect Tests
+    # ==========================================================================
+    ax6 = axes[1, 2]
+    
+    if len(result.feature_names) == 1:
+        # Single predictor - plot S-curve
+        feature = result.feature_names[0]
+        x_vals = result.X_clean[feature].values
+        
+        # Create smooth grid
+        x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
+        X_grid_df = pd.DataFrame({feature: x_grid})
+        X_grid_const = sm.add_constant(X_grid_df)
+        p_grid = result.model.predict(X_grid_const)
+        
+        # Plot jittered actual values
+        jitter = np.random.normal(0, 0.02, len(y_true))
+        ax6.scatter(x_vals, y_true + jitter, alpha=0.3, s=20, label='Observed (jittered)')
+        ax6.plot(x_grid, p_grid, 'b-', linewidth=2, label='Fitted probability')
+        ax6.axhline(y=result.threshold, color='r', linestyle='--', alpha=0.5, 
+                   label=f'Threshold = {result.threshold}')
+        ax6.set_xlabel(feature, fontsize=11)
+        ax6.set_ylabel(f'P({result.target_level})', fontsize=11)
+        ax6.set_title('Logistic Plot', fontsize=11)
+        ax6.legend(loc='best')
+        ax6.set_ylim([-0.1, 1.1])
+    else:
+        # Multiple predictors - show effect summary
+        effect_df = result.effect_tests.copy()
+        effect_df = effect_df.sort_values('L-R ChiSquare', ascending=True)
+        
+        y_pos = range(len(effect_df))
+        colors = ['green' if p < 0.05 else 'gray' for p in effect_df['Prob>ChiSq']]
+        ax6.barh(y_pos, effect_df['L-R ChiSquare'], color=colors, edgecolor='black')
+        ax6.set_yticks(y_pos)
+        ax6.set_yticklabels(effect_df['Source'])
+        ax6.set_xlabel('L-R ChiSquare', fontsize=11)
+        ax6.set_title('Effect Likelihood Ratio Tests\n(Green = p < 0.05)', fontsize=11)
+        ax6.grid(True, alpha=0.3, axis='x')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
+
+
+def plot_logistic_roc(
+    result: LogisticRegressionResults,
+    figsize: Tuple[int, int] = (12, 5)
+) -> Optional[Any]:
+    """
+    Plot ROC curve and confusion matrix for logistic regression.
+    
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Results from logistic_regression()
+    figsize : tuple, default=(12, 5)
+        Figure size
+        
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+    
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    
+    # ROC Curve
+    ax1 = axes[0]
+    y_true = (result.y_actual == result.target_level).astype(int)
+    y_prob = result.predicted_probs[f'Prob[{result.target_level}]']
+    
+    # Calculate ROC curve points
+    thresholds = np.linspace(0, 1, 100)
+    tpr_list, fpr_list = [], []
+    
+    for thresh in thresholds:
+        y_pred = (y_prob >= thresh).astype(int)
+        tp = ((y_pred == 1) & (y_true == 1)).sum()
+        fn = ((y_pred == 0) & (y_true == 1)).sum()
+        fp = ((y_pred == 1) & (y_true == 0)).sum()
+        tn = ((y_pred == 0) & (y_true == 0)).sum()
+        
+        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+        tpr_list.append(tpr)
+        fpr_list.append(fpr)
+    
+    # Calculate AUC using trapezoidal rule
+    sorted_indices = np.argsort(fpr_list)
+    fpr_sorted = np.array(fpr_list)[sorted_indices]
+    tpr_sorted = np.array(tpr_list)[sorted_indices]
+    auc = np.trapz(tpr_sorted, fpr_sorted)
+    
+    ax1.plot(fpr_list, tpr_list, 'b-', linewidth=2, label=f'ROC Curve (AUC = {auc:.4f})')
+    ax1.plot([0, 1], [0, 1], 'r--', linewidth=1, label='Random Classifier')
+    ax1.fill_between(fpr_sorted, tpr_sorted, alpha=0.3)
+    ax1.set_xlabel('False Positive Rate (1 - Specificity)', fontsize=11)
+    ax1.set_ylabel('True Positive Rate (Sensitivity)', fontsize=11)
+    ax1.set_title('ROC Curve', fontsize=12)
+    ax1.legend(loc='lower right')
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlim([0, 1])
+    ax1.set_ylim([0, 1])
+    
+    # Confusion Matrix Heatmap
+    ax2 = axes[1]
+    conf_matrix = result.confusion_matrix
+    conf_normalized = conf_matrix.div(conf_matrix.sum(axis=1), axis=0).fillna(0)
+    
+    im = ax2.imshow(conf_normalized.values, cmap='Blues', aspect='auto', vmin=0, vmax=1)
+    
+    for i in range(len(result.response_levels)):
+        for j in range(len(result.response_levels)):
+            count = conf_matrix.iloc[i, j]
+            pct = conf_normalized.iloc[i, j] * 100
+            color = 'white' if conf_normalized.iloc[i, j] > 0.5 else 'black'
+            ax2.text(j, i, f'{count}\n({pct:.1f}%)', ha='center', va='center', 
+                    color=color, fontsize=10)
+    
+    ax2.set_xticks(range(len(result.response_levels)))
+    ax2.set_yticks(range(len(result.response_levels)))
+    ax2.set_xticklabels(result.response_levels, fontsize=10)
+    ax2.set_yticklabels(result.response_levels, fontsize=10)
+    ax2.set_xlabel('Predicted', fontsize=11)
+    ax2.set_ylabel('Actual', fontsize=11)
+    ax2.set_title(f'Confusion Matrix (Threshold = {result.threshold})', fontsize=12)
+    plt.colorbar(im, ax=ax2, label='Proportion')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return fig
+
+
+def roc_curve(
+    y_true: Union[pd.Series, np.ndarray],
+    y_prob: Union[pd.Series, np.ndarray],
+    positive_label: Optional[str] = None,
+    plot: bool = True
+) -> Dict[str, Any]:
+    """
+    Calculate ROC curve and AUC (JMP-style).
+    
+    Parameters
+    ----------
+    y_true : array-like
+        True labels
+    y_prob : array-like
+        Predicted probabilities for positive class
+    positive_label : str, optional
+        Label considered positive. Default is 1 or last alphabetically.
+    plot : bool, default=True
+        Whether to display ROC curve
+        
+    Returns
+    -------
+    dict
+        Contains 'fpr', 'tpr', 'thresholds', 'auc'
+        
+    Examples
+    --------
+    >>> roc = roc_curve(df['Actual'], df['Predicted_Prob'])
+    >>> print(f"AUC: {roc['auc']:.4f}")
+    """
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+    
+    # Determine positive label
+    unique_labels = sorted(np.unique(y_true[~pd.isna(y_true)]))
+    if positive_label is None:
+        positive_label = unique_labels[-1] if len(unique_labels) > 1 else 1
+    
+    # Convert to binary
+    y_binary = (y_true == positive_label).astype(int)
+    
+    # Remove NaN
+    mask = ~(np.isnan(y_binary) | np.isnan(y_prob))
+    y_binary = y_binary[mask]
+    y_prob = y_prob[mask]
+    
+    # Calculate ROC points
+    thresholds = np.linspace(0, 1, 200)
+    tpr_list, fpr_list = [], []
+    
+    for thresh in thresholds:
+        y_pred = (y_prob >= thresh).astype(int)
+        tp = ((y_pred == 1) & (y_binary == 1)).sum()
+        fn = ((y_pred == 0) & (y_binary == 1)).sum()
+        fp = ((y_pred == 1) & (y_binary == 0)).sum()
+        tn = ((y_pred == 0) & (y_binary == 0)).sum()
+        
+        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+        tpr_list.append(tpr)
+        fpr_list.append(fpr)
+    
+    # Calculate AUC
+    sorted_indices = np.argsort(fpr_list)
+    fpr_sorted = np.array(fpr_list)[sorted_indices]
+    tpr_sorted = np.array(tpr_list)[sorted_indices]
+    auc = np.trapz(tpr_sorted, fpr_sorted)
+    
+    result = {
+        'fpr': np.array(fpr_list),
+        'tpr': np.array(tpr_list),
+        'thresholds': thresholds,
+        'auc': auc,
+        'positive_label': positive_label
+    }
+    
+    if plot and HAS_MATPLOTLIB:
+        fig, ax = plt.subplots(figsize=(8, 6))
+        ax.plot(fpr_list, tpr_list, 'b-', linewidth=2, label=f'ROC Curve (AUC = {auc:.4f})')
+        ax.plot([0, 1], [0, 1], 'r--', linewidth=1, label='Random Classifier')
+        ax.fill_between(fpr_sorted, tpr_sorted, alpha=0.3)
+        ax.set_xlabel('False Positive Rate', fontsize=11)
+        ax.set_ylabel('True Positive Rate', fontsize=11)
+        ax.set_title('ROC Curve', fontsize=12)
+        ax.legend(loc='lower right')
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+    
+    return result
+
+
+def confusion_matrix_stats(
+    y_true: Union[pd.Series, np.ndarray],
+    y_pred: Union[pd.Series, np.ndarray],
+    positive_label: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Calculate confusion matrix and classification metrics (JMP-style).
+    
+    Parameters
+    ----------
+    y_true : array-like
+        True labels
+    y_pred : array-like
+        Predicted labels
+    positive_label : str, optional
+        Label considered positive
+        
+    Returns
+    -------
+    dict
+        Contains confusion matrix and all classification metrics
+        
+    Examples
+    --------
+    >>> stats = confusion_matrix_stats(df['Actual'], df['Predicted'])
+    >>> print(f"Accuracy: {stats['accuracy']:.4f}")
+    >>> print(f"Sensitivity: {stats['sensitivity']:.4f}")
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    
+    # Get unique labels
+    labels = sorted(np.unique(np.concatenate([y_true, y_pred])))
+    
+    if positive_label is None:
+        positive_label = labels[-1]
+    negative_label = [l for l in labels if l != positive_label][0]
+    
+    # Calculate confusion matrix values
+    tp = ((y_pred == positive_label) & (y_true == positive_label)).sum()
+    tn = ((y_pred == negative_label) & (y_true == negative_label)).sum()
+    fp = ((y_pred == positive_label) & (y_true == negative_label)).sum()
+    fn = ((y_pred == negative_label) & (y_true == positive_label)).sum()
+    
+    # Calculate metrics
+    n = len(y_true)
+    accuracy = (tp + tn) / n if n > 0 else 0
+    misclassification = 1 - accuracy
+    
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0  # True Positive Rate / Recall
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0  # True Negative Rate
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0    # Positive Predictive Value
+    npv = tn / (tn + fn) if (tn + fn) > 0 else 0          # Negative Predictive Value
+    
+    f1 = 2 * (precision * sensitivity) / (precision + sensitivity) if (precision + sensitivity) > 0 else 0
+    
+    # Create confusion matrix DataFrame
+    conf_matrix = pd.DataFrame(
+        [[tn, fp], [fn, tp]],
+        index=[f'Actual: {negative_label}', f'Actual: {positive_label}'],
+        columns=[f'Pred: {negative_label}', f'Pred: {positive_label}']
+    )
+    
+    return {
+        'confusion_matrix': conf_matrix,
+        'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn,
+        'accuracy': accuracy,
+        'misclassification_rate': misclassification,
+        'sensitivity': sensitivity,  # Recall, True Positive Rate
+        'specificity': specificity,  # True Negative Rate
+        'precision': precision,      # Positive Predictive Value
+        'npv': npv,                  # Negative Predictive Value
+        'f1_score': f1,
+        'positive_label': positive_label,
+        'negative_label': negative_label,
+        'n': n
+    }
+
+
+# =============================================================================
 # BOOTSTRAP METHODS (Added v2.5.0)
 # =============================================================================
 
@@ -7993,6 +9129,10 @@ __all__ = [
     
     # NEW v2.5.0: Bootstrap Methods
     'BootstrapResults', 'bootstrap', 'bootstrap_rmse', 'plot_bootstrap_distribution',
+    
+    # NEW v2.5.0: Logistic Regression
+    'LogisticRegressionResults', 'logistic_regression', 'plot_logistic_diagnostics',
+    'plot_logistic_roc', 'roc_curve', 'confusion_matrix_stats', 'save_logistic_predictions',
     
     # Utilities
     'detect_outliers', 'recode', 'log_transform',
