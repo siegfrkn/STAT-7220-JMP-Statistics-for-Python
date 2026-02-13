@@ -905,11 +905,11 @@ def linear_regression(y: Union[pd.Series, np.ndarray],
     
     predictions = model.predict(X_with_const)
     residuals = y - predictions
-    
-    rmse = float(np.sqrt(np.mean(residuals**2)))
+
+    rmse = float(np.sqrt(model.mse_resid))  # JMP RMSE = sqrt(MSE) = sqrt(SSE/(n-p))
     mae = float(np.mean(np.abs(residuals)))
     mape = float(np.mean(np.abs(residuals / y)) * 100) if np.all(y != 0) else np.nan
-    
+
     if add_constant:
         intercept = float(model.params[0])
         intercept_se = float(model.bse[0])
@@ -1042,8 +1042,8 @@ def linear_regression_formula(formula: str,
     n = int(model.nobs)
     predictions = model.predict(data)
     residuals = model.resid
-    
-    rmse = float(np.sqrt(np.mean(residuals**2)))
+
+    rmse = float(np.sqrt(model.mse_resid))  # JMP RMSE = sqrt(MSE) = sqrt(SSE/(n-p))
     mae = float(np.mean(np.abs(residuals)))
     y_values = model.model.endog
     mape = float(np.mean(np.abs(residuals / y_values)) * 100) if np.all(y_values != 0) else np.nan

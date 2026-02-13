@@ -1,7 +1,7 @@
 # JMP-Stats: JMP-Style Statistical Analysis for Python
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Version 2.3.0](https://img.shields.io/badge/version-2.3.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
+[![Version 2.5.1](https://img.shields.io/badge/version-2.5.1-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
 
 A comprehensive Python library that replicates JMP's statistical analysis capabilities for predictive analytics. Designed for students and practitioners who want to perform the same analyses in Python that they would do in JMP.
 
@@ -24,6 +24,9 @@ A comprehensive Python library that replicates JMP's statistical analysis capabi
   - [Prediction Profiler](#prediction-profiler)
   - [Design of Experiments](#design-of-experiments)
   - [Time Series Analysis](#time-series-analysis)
+  - [Logistic Regression](#logistic-regression)
+  - [Bootstrap Methods](#bootstrap-methods)
+  - [K Nearest Neighbors](#k-nearest-neighbors)
 - [Function Reference](#function-reference)
 - [Examples](#examples)
 - [Tips & Best Practices](#tips--best-practices)
@@ -36,7 +39,7 @@ A comprehensive Python library that replicates JMP's statistical analysis capabi
 ### Requirements
 
 ```bash
-pip install numpy pandas scipy statsmodels matplotlib seaborn
+pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn
 ```
 
 ### Setup
@@ -641,6 +644,124 @@ print(f"Forecasts: {forecast['forecast']}")
 
 ---
 
+### Logistic Regression
+
+Perform binary logistic regression with JMP-style output (JMP's Fit Y by X / Fit Model with categorical Y).
+
+```python
+# Binary logistic regression
+result = jmp.logistic_regression(
+    df['purchased'],           # Binary response (0/1)
+    df[['income', 'age']],     # Predictors
+    alpha=0.05
+)
+print(result)
+
+# Access results
+print(f"AUC: {result.auc:.4f}")
+print(f"Misclassification Rate: {result.misclassification_rate:.4f}")
+print(result.confusion_matrix)
+
+# ROC curve
+jmp.plot_logistic_roc(result)
+
+# Standalone ROC curve calculation
+fpr, tpr, thresholds, auc = jmp.roc_curve(y_true, y_predicted_probs)
+
+# Classification metrics
+metrics = jmp.confusion_matrix_stats(y_true, y_predicted)
+print(f"Accuracy: {metrics['accuracy']:.4f}")
+print(f"Sensitivity: {metrics['sensitivity']:.4f}")
+print(f"Specificity: {metrics['specificity']:.4f}")
+print(f"F1 Score: {metrics['f1_score']:.4f}")
+```
+
+**Output includes:**
+- Coefficients, standard errors, z-values, p-values
+- Odds ratios with confidence intervals
+- Confusion matrix and misclassification rate
+- AUC (Area Under ROC Curve)
+- Log-likelihood, AIC, BIC
+
+---
+
+### Bootstrap Methods
+
+Compute bootstrap confidence intervals for any statistic, including RMSE (JMP's Bootstrap command).
+
+```python
+# Bootstrap confidence interval for RMSE
+boot = jmp.bootstrap_rmse(
+    y=df['response'],
+    X=df[['x1', 'x2']],
+    n_bootstrap=1000,
+    confidence_level=0.90,
+    random_state=42
+)
+print(f"Observed RMSE: {boot.observed:.4f}")
+print(f"90% CI: [{boot.ci_lower:.4f}, {boot.ci_upper:.4f}]")
+
+# Visualize bootstrap distribution
+jmp.plot_bootstrap_distribution(boot)
+
+# Generic bootstrap for any statistic
+result = jmp.bootstrap(
+    data=df['price'],
+    statistic_func=np.mean,    # Any function
+    n_bootstrap=1000,
+    confidence_level=0.95
+)
+print(f"Bootstrap mean: {result.observed:.4f}")
+print(f"95% CI: [{result.ci_lower:.4f}, {result.ci_upper:.4f}]")
+```
+
+**Output includes:**
+- Observed statistic value
+- Bootstrap distribution (all resampled values)
+- Confidence intervals (percentile, basic, and BCa methods)
+- Standard error of the bootstrap distribution
+
+---
+
+### K Nearest Neighbors
+
+Perform KNN classification or regression with automatic K selection (JMP's Analyze > Predictive Modeling > K Nearest Neighbors).
+
+```python
+# Auto-detect classification vs regression
+result = jmp.k_nearest_neighbors(
+    y=df['species'],                # Categorical → classification
+    X=df[['sepal_length', 'petal_width']],
+    k_values=[3, 5, 7, 9, 11],     # K values to try
+    test_size=0.3,
+    random_state=42
+)
+print(result)
+print(f"Best K: {result.best_k}")
+print(f"Accuracy: {result.accuracy:.4f}")
+
+# Convenience wrappers
+clf = jmp.knn_classification(df['species'], df[predictors], k=5)
+reg = jmp.knn_regression(df['price'], df[predictors], k=7)
+
+# Visualize K selection
+jmp.plot_knn_results(result)
+
+# Save predictions back to DataFrame
+df_with_preds = jmp.save_knn_predictions(result, df)
+
+# Lift curve for classification
+jmp.knn_lift_curve(result)
+```
+
+**Output includes:**
+- Best K value based on validation error
+- Error rates for each K value tested
+- Confusion matrix (classification) or RMSE (regression)
+- Misclassification rate or R-squared
+
+---
+
 ## Function Reference
 
 ### Data Import & Utilities
@@ -702,6 +823,36 @@ print(f"Forecasts: {forecast['forecast']}")
 | `validate_model()` | Train and evaluate on test set |
 | `compare_models()` | Compare multiple models |
 | `compare_all_criteria()` | Run all criteria and compare |
+
+### Logistic Regression
+
+| Function | Description |
+|----------|-------------|
+| `logistic_regression()` | Binary logistic regression with odds ratios and AUC |
+| `plot_logistic_diagnostics()` | Diagnostic plots for logistic regression |
+| `plot_logistic_bivariate()` | Bivariate logistic fit (JMP's Fit Y by X) |
+| `plot_logistic_roc()` | ROC curve visualization with AUC |
+| `roc_curve()` | Standalone ROC curve calculation |
+| `confusion_matrix_stats()` | Classification metrics (accuracy, sensitivity, specificity, F1) |
+
+### Bootstrap Methods
+
+| Function | Description |
+|----------|-------------|
+| `bootstrap()` | Generic bootstrap for any statistic |
+| `bootstrap_rmse()` | Bootstrap confidence interval for RMSE |
+| `plot_bootstrap_distribution()` | Visualize bootstrap distribution with CI |
+
+### K Nearest Neighbors
+
+| Function | Description |
+|----------|-------------|
+| `k_nearest_neighbors()` | KNN with auto-detect classification/regression |
+| `knn_classification()` | Convenience wrapper for KNN classification |
+| `knn_regression()` | Convenience wrapper for KNN regression |
+| `plot_knn_results()` | JMP-style error rate plots |
+| `save_knn_predictions()` | Save predictions back to DataFrame |
+| `knn_lift_curve()` | Lift curves for classification |
 
 ### Feature Engineering
 
@@ -899,20 +1050,19 @@ Priority additions for upcoming versions:
    - `random_effects()`: Support for random intercepts and slopes
    - `mixed_model()`: Linear mixed effects regression (like JMP's Mixed Model)
 
-2. **Logistic Regression**
-   - `logistic_regression()`: Binary and multinomial logistic regression
-   - ROC curves and AUC calculation
-   - Classification metrics (confusion matrix, precision, recall)
-
-3. **Enhanced Model Selection**
+2. **Enhanced Model Selection**
    - `cross_validation()`: K-fold CV with multiple metrics
    - `regularized_regression()`: Ridge, Lasso, Elastic Net
    - `model_averaging()`: Combine predictions from multiple models
 
-4. **Additional Diagnostics**
+3. **Additional Diagnostics**
    - `vif()`: Standalone Variance Inflation Factors function
    - `partial_regression_plots()`: Added variable plots
    - `component_residual_plots()`: Partial residual plots
+
+4. **Multinomial Logistic Regression**
+   - Extend `logistic_regression()` for multi-class outcomes
+   - Generalized logit model with multiple response levels
 
 ---
 
@@ -930,6 +1080,8 @@ Contributions welcome! Please submit issues and pull requests on GitHub.
 
 ## Version History
 
+- **v2.5.1** - Fixed RMSE calculation in `linear_regression()` and `linear_regression_formula()` to use `sqrt(MSE)` = `sqrt(SSE/(n-p))` matching JMP's definition (was previously computing `sqrt(SSE/n)`)
+- **v2.5.0** - Added K Nearest Neighbors (`k_nearest_neighbors()`, `knn_classification()`, `knn_regression()`), Bootstrap Methods (`bootstrap()`, `bootstrap_rmse()`), and Logistic Regression (`logistic_regression()`, `plot_logistic_roc()`, `roc_curve()`, `confusion_matrix_stats()`)
 - **v2.3.0** - Enhanced `linear_regression()` with `poly_degree`, `log_y`, `log_X` parameters; added `linear_regression_formula()` for categorical variables
 - **v2.2.0** - Added prediction intervals (`prediction_interval()`) for forecasting with CI and PI
 - **v2.1.0** - Added categorical variable encoding (`encode_categorical()`, `encode_effect()`)
