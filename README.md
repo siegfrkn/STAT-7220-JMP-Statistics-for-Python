@@ -695,7 +695,7 @@ boot = jmp.bootstrap_rmse(
     y=df['response'],
     X=df[['x1', 'x2']],
     n_bootstrap=1000,
-    confidence_level=0.90,
+    ci_level=0.90,
     random_state=42
 )
 print(f"Observed RMSE: {boot.observed:.4f}")
@@ -709,7 +709,7 @@ result = jmp.bootstrap(
     data=df['price'],
     statistic_func=np.mean,    # Any function
     n_bootstrap=1000,
-    confidence_level=0.95
+    ci_level=0.95
 )
 print(f"Bootstrap mean: {result.observed:.4f}")
 print(f"95% CI: [{result.ci_lower:.4f}, {result.ci_upper:.4f}]")
