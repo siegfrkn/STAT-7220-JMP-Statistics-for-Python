@@ -9,6 +9,19 @@ matplotlib/seaborn for visualization.
 Installation Requirements:
     pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn
 
+NEW IN v2.6.0:
+    - DECISION TREES / PARTITION (JMP's Analyze > Predictive Modeling > Partition):
+        - decision_tree(): Auto-detects classification/regression
+        - decision_tree_classification(): Convenience wrapper for classification
+        - decision_tree_regression(): Convenience wrapper for regression
+        - Automatic depth selection based on validation error
+        - Confusion matrix and misclassification rates
+        - Feature importances (column contributions)
+        - Tree rules text output
+        - plot_decision_tree_results(): JMP-style error rate and confusion matrix plots
+        - save_decision_tree_predictions(): Like JMP's Save Predicteds
+        - Support for validation_column (JMP-style train/validation/test)
+
 NEW IN v2.5.0:
     - K NEAREST NEIGHBORS (JMP's Analyze > Predictive Modeling > K Nearest Neighbors):
         - k_nearest_neighbors(): Auto-detects classification/regression
@@ -263,11 +276,12 @@ try:
 except ImportError:
     HAS_STATSMODELS = False
 
-# sklearn imports for KNN
+# sklearn imports for KNN and Decision Trees
 try:
     from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
     from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import train_test_split as sklearn_train_test_split
+    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor, export_text
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
@@ -7690,25 +7704,147 @@ def plot_logistic_diagnostics(
     return fig
 
 
+def _fit_smoothing_spline(
+    x: np.ndarray,
+    y: np.ndarray,
+    spline_lambda: Optional[float] = None,
+    spline_df: Optional[float] = None
+) -> Tuple[Any, float, float]:
+    """
+    Fit a penalized cubic smoothing spline matching JMP's Fit Spline.
+
+    Minimizes: sum(yi - f(xi))^2 + lambda * integral(f''(x)^2 dx)
+    with a knot at every data point.
+
+    Parameters
+    ----------
+    x : array-like
+        Predictor values
+    y : array-like
+        Response values (can be binary 0/1)
+    spline_lambda : float, optional
+        Penalty parameter (JMP's lambda). Larger = smoother.
+        Overrides spline_df if both given.
+    spline_df : float, optional
+        Target effective degrees of freedom (trace of smoother matrix).
+        df=2 is linear, df=n is interpolation. Found via binary search
+        over lambda.
+
+    Returns
+    -------
+    spline : BSpline
+        Fitted spline callable
+    lam : float
+        Lambda value used
+    edf : float
+        Effective degrees of freedom achieved
+    """
+    from scipy.interpolate import make_smoothing_spline
+
+    # Sort data by x (required by make_smoothing_spline)
+    sort_idx = np.argsort(x)
+    x_sorted = x[sort_idx].astype(float)
+    y_sorted = y[sort_idx].astype(float)
+
+    # Handle duplicate x values by averaging y at each unique x
+    x_unique, inverse = np.unique(x_sorted, return_inverse=True)
+    if len(x_unique) < len(x_sorted):
+        y_unique = np.zeros(len(x_unique))
+        counts = np.zeros(len(x_unique))
+        for i, idx in enumerate(inverse):
+            y_unique[idx] += y_sorted[i]
+            counts[idx] += 1
+        y_unique /= counts
+        x_sorted = x_unique
+        y_sorted = y_unique
+
+    n = len(x_sorted)
+
+    def _compute_edf(x_s, lam_val):
+        """Compute effective df = trace(S) for a given lambda."""
+        trace = 0.0
+        for i in range(len(x_s)):
+            e_i = np.zeros(len(x_s))
+            e_i[i] = 1.0
+            spl_i = make_smoothing_spline(x_s, e_i, lam=lam_val)
+            trace += spl_i(x_s[i])
+        return trace
+
+    if spline_lambda is not None:
+        # User specified lambda directly
+        spline = make_smoothing_spline(x_sorted, y_sorted, lam=spline_lambda)
+        edf = _compute_edf(x_sorted, spline_lambda)
+        return spline, spline_lambda, edf
+
+    elif spline_df is not None:
+        # Binary search for lambda that achieves target df
+        # Higher lambda = lower df; lower lambda = higher df
+        lam_low, lam_high = 1e-6, 1e10
+        target = float(spline_df)
+
+        for _ in range(40):
+            lam_mid = np.sqrt(lam_low * lam_high)  # geometric midpoint
+            cur_df = _compute_edf(x_sorted, lam_mid)
+            if cur_df > target:
+                lam_low = lam_mid   # need more penalty to reduce df
+            else:
+                lam_high = lam_mid  # need less penalty to increase df
+
+        best_lam = np.sqrt(lam_low * lam_high)
+        spline = make_smoothing_spline(x_sorted, y_sorted, lam=best_lam)
+        final_edf = _compute_edf(x_sorted, best_lam)
+        return spline, best_lam, final_edf
+
+    else:
+        # No lambda or df specified — use GCV (scipy's default, same as JMP default)
+        spline = make_smoothing_spline(x_sorted, y_sorted)
+        # Recover the lambda used by GCV — not directly exposed, so
+        # bracket it by checking the fit
+        # Instead, just compute edf at the GCV solution
+        # Use a rough approach: binary search for the lambda that reproduces
+        # the GCV spline's SSE
+        y_hat = spline(x_sorted)
+        gcv_sse = np.sum((y_sorted - y_hat) ** 2)
+
+        lam_low, lam_high = 1e-6, 1e10
+        for _ in range(40):
+            lam_mid = np.sqrt(lam_low * lam_high)
+            test_spl = make_smoothing_spline(x_sorted, y_sorted, lam=lam_mid)
+            test_sse = np.sum((y_sorted - test_spl(x_sorted)) ** 2)
+            if test_sse < gcv_sse:
+                lam_low = lam_mid
+            else:
+                lam_high = lam_mid
+
+        gcv_lam = np.sqrt(lam_low * lam_high)
+        edf = _compute_edf(x_sorted, gcv_lam)
+        return spline, gcv_lam, edf
+
+
 def plot_logistic_bivariate(
     result: LogisticRegressionResults,
     feature: Optional[str] = None,
     figsize: Tuple[int, int] = (10, 7),
     show_threshold: bool = True,
     show_rug: bool = True,
+    show_spline: bool = False,
+    spline_df: Optional[float] = None,
+    spline_lambda: Optional[float] = None,
     n_grid: int = 200
 ) -> Optional[Any]:
     """
     JMP-style Bivariate Fit diagram for logistic regression.
-    
+
     Creates the classic logistic S-curve plot showing:
     - Actual outcomes (0/1) as points (jittered for visibility)
-    - Fitted probability curve
+    - Fitted probability curve (parametric logistic)
+    - Optional smoothing spline curve (nonparametric fit)
     - Optional threshold line
     - Rug plots showing distribution of X for each outcome
-    
-    This replicates JMP's Fit Y by X > Logistic plot.
-    
+
+    This replicates JMP's Fit Y by X > Logistic plot, with optional
+    Fit Spline overlay for model adequacy assessment.
+
     Parameters
     ----------
     result : LogisticRegressionResults
@@ -7722,49 +7858,73 @@ def plot_logistic_bivariate(
         Whether to show the classification threshold line
     show_rug : bool, default=True
         Whether to show rug plots for each outcome level
+    show_spline : bool, default=False
+        Whether to overlay a penalized cubic smoothing spline curve
+        (matching JMP's Fit Spline in Fit Y by X). The spline minimizes:
+            sum(yi - f(xi))^2 + lambda * integral(f''(x)^2 dx)
+        with a knot at every data point. Provides a nonparametric estimate
+        of P(Y=1|X) that can reveal departures from the parametric logistic
+        form (e.g., non-monotonicity, local bumps).
+    spline_df : float, optional
+        Target effective degrees of freedom for the smoothing spline
+        (df = trace of the smoother hat matrix). Controls flexibility:
+        df=2 is a straight line, df=n is interpolation. Typical range
+        is 3-15. Found via binary search over lambda. If neither spline_df
+        nor spline_lambda is specified, lambda is chosen automatically by
+        Generalized Cross-Validation (GCV).
+    spline_lambda : float, optional
+        Smoothing penalty parameter passed directly to the spline fitter
+        (same as JMP's lambda). Larger values = smoother curve, smaller =
+        more flexible. Overrides spline_df if both given.
     n_grid : int, default=200
-        Number of points for the fitted curve
-        
+        Number of points for the fitted curves
+
     Returns
     -------
     matplotlib.figure.Figure or None
-    
+
     Examples
     --------
     >>> result = jmp.logistic_regression(df['Status'], df[['Schedule lag']], plot=False)
     >>> jmp.plot_logistic_bivariate(result)
-    
+
+    >>> # Overlay spline to check logistic model adequacy
+    >>> jmp.plot_logistic_bivariate(result, show_spline=True)
+
+    >>> # Control spline smoothness with degrees of freedom
+    >>> jmp.plot_logistic_bivariate(result, show_spline=True, spline_df=4)
+
     >>> # For multiple predictors, specify which one to plot
     >>> result = jmp.logistic_regression(df['Status'], df[['Age', 'Weight']], plot=False)
-    >>> jmp.plot_logistic_bivariate(result, feature='Age')
+    >>> jmp.plot_logistic_bivariate(result, feature='Age', show_spline=True)
     """
     if not HAS_MATPLOTLIB:
         print("matplotlib required for plotting")
         return None
-    
+
     # Determine which feature to plot
     if feature is None:
         if len(result.feature_names) == 1:
             feature = result.feature_names[0]
         else:
             raise ValueError(f"Multiple predictors in model. Specify which feature to plot: {result.feature_names}")
-    
+
     if feature not in result.feature_names:
         raise ValueError(f"Feature '{feature}' not in model. Available: {result.feature_names}")
-    
+
     # Get data
     x_vals = result.X_clean[feature].values
     y_binary = result.y_binary.values
     y_prob = result.predicted_probs[f'Prob[{result.target_level}]'].values
-    
+
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
-    
+
     # Create smooth grid for fitted curve
     x_min, x_max = x_vals.min(), x_vals.max()
     x_range = x_max - x_min
     x_grid = np.linspace(x_min - 0.05 * x_range, x_max + 0.05 * x_range, n_grid)
-    
+
     # For single predictor, calculate predictions directly
     # For multiple predictors, hold others at mean
     if len(result.feature_names) == 1:
@@ -7773,74 +7933,222 @@ def plot_logistic_bivariate(
         p_grid = result.model.predict(X_grid_const)
     else:
         # Hold other predictors at their means
-        X_grid_df = pd.DataFrame({f: np.full(n_grid, result.X_clean[f].mean()) 
+        X_grid_df = pd.DataFrame({f: np.full(n_grid, result.X_clean[f].mean())
                                   for f in result.feature_names})
         X_grid_df[feature] = x_grid
         # Reorder columns to match original order and add constant
         X_grid_ordered = X_grid_df[result.feature_names]
         X_grid_const = sm.add_constant(X_grid_ordered, has_constant='add')
         p_grid = result.model.predict(X_grid_const)
-    
-    # Jitter y values for visibility
-    jitter_amount = 0.03
-    np.random.seed(42)
-    y_jittered = y_binary + np.random.uniform(-jitter_amount, jitter_amount, len(y_binary))
-    
-    # Plot actual outcomes with different colors
+
+    # Jitter y values for visibility (only when spline is off)
     mask_0 = y_binary == 0
     mask_1 = y_binary == 1
-    
-    ax.scatter(x_vals[mask_0], y_jittered[mask_0], 
-               alpha=0.5, s=40, c='#d62728', label=f'{result.other_level}', 
+
+    if show_spline:
+        # No jitter — plot points exactly at 0 and 1
+        y_plot = y_binary.astype(float)
+    else:
+        jitter_amount = 0.03
+        np.random.seed(42)
+        y_plot = y_binary + np.random.uniform(-jitter_amount, jitter_amount, len(y_binary))
+
+    # Plot actual outcomes with different colors
+    ax.scatter(x_vals[mask_0], y_plot[mask_0],
+               alpha=0.5, s=40, c='#d62728', label=f'{result.other_level}',
                edgecolors='white', linewidth=0.5)
-    ax.scatter(x_vals[mask_1], y_jittered[mask_1], 
+    ax.scatter(x_vals[mask_1], y_plot[mask_1],
                alpha=0.5, s=40, c='#2ca02c', label=f'{result.target_level}',
                edgecolors='white', linewidth=0.5)
-    
-    # Plot fitted probability curve
-    ax.plot(x_grid, p_grid, 'b-', linewidth=3, label='Fitted Probability')
-    
+
+    # Plot fitted logistic probability curve
+    ax.plot(x_grid, p_grid, 'b-', linewidth=3, label='Logistic Fit')
+
+    # Overlay penalized cubic smoothing spline if requested
+    # Uses scipy's make_smoothing_spline which matches JMP's Fit Spline:
+    #   minimize sum(yi - f(xi))^2 + lambda * integral(f''(x)^2 dx)
+    if show_spline:
+        spline, spline_lam, spline_edf = _fit_smoothing_spline(
+            x_vals, y_binary.astype(float),
+            spline_lambda=spline_lambda, spline_df=spline_df
+        )
+
+        # Evaluate spline on the grid (clip to [0, 1] since it's a probability)
+        spline_grid = np.clip(spline(x_grid), 0, 1)
+
+        spline_label = f'Smoothing Spline (\u03bb={spline_lam:.1f}, df={spline_edf:.1f})'
+        ax.plot(x_grid, spline_grid, color='#ff7f0e', linewidth=2.5,
+                linestyle='--', label=spline_label)
+
     # Add threshold line
     if show_threshold:
-        ax.axhline(y=result.threshold, color='gray', linestyle='--', 
+        ax.axhline(y=result.threshold, color='gray', linestyle='--',
                    linewidth=1.5, alpha=0.7, label=f'Threshold = {result.threshold}')
-    
-    # Add rug plots
-    if show_rug:
+
+    # Add rug plots (skip when spline is shown — points already sit at 0/1)
+    if show_rug and not show_spline:
         # Bottom rug for outcome = 0
-        ax.plot(x_vals[mask_0], np.zeros(mask_0.sum()) - 0.02, '|', 
+        ax.plot(x_vals[mask_0], np.zeros(mask_0.sum()) - 0.02, '|',
                 color='#d62728', alpha=0.5, markersize=10)
         # Top rug for outcome = 1
-        ax.plot(x_vals[mask_1], np.ones(mask_1.sum()) + 0.02, '|', 
+        ax.plot(x_vals[mask_1], np.ones(mask_1.sum()) + 0.02, '|',
                 color='#2ca02c', alpha=0.5, markersize=10)
-    
+
     # Labels and formatting
     ax.set_xlabel(feature, fontsize=12)
     ax.set_ylabel(f'P({result.target_level})', fontsize=12)
-    ax.set_title(f'Bivariate Fit: {result.target_level} by {feature}\n'
-                 f'AUC = {result.auc:.4f}, Misclass = {result.misclassification_rate:.2%}', 
-                 fontsize=12)
-    
+
+    title = f'Bivariate Fit: {result.target_level} by {feature}\n'
+    title += f'AUC = {result.auc:.4f}, Misclass = {result.misclassification_rate:.2%}'
+    if show_spline:
+        title += '  |  Spline overlay enabled'
+    ax.set_title(title, fontsize=12)
+
     # Set y-axis limits with padding
     ax.set_ylim(-0.1, 1.1)
     ax.set_xlim(x_min - 0.05 * x_range, x_max + 0.05 * x_range)
-    
+
     # Add y-axis labels for outcome levels
     ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
     ax2 = ax.twinx()
     ax2.set_ylim(-0.1, 1.1)
     ax2.set_yticks([0, 1])
     ax2.set_yticklabels([result.other_level, result.target_level], fontsize=10)
-    
+
     # Legend
     ax.legend(loc='center right', fontsize=10)
-    
+
     # Grid
     ax.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
     plt.show()
-    
+
+    return fig
+
+
+def plot_logistic_spline_comparison(
+    result: LogisticRegressionResults,
+    feature: Optional[str] = None,
+    df_values: List[float] = None,
+    figsize: Tuple[int, int] = (18, 5)
+) -> Optional[Any]:
+    """
+    Compare logistic fit vs penalized cubic smoothing spline at different
+    flexibility levels.
+
+    Creates a side-by-side panel plot showing the parametric logistic curve
+    overlaid with smoothing splines at varying effective degrees of freedom.
+    Uses the same penalized smoothing spline as JMP's Fit Spline:
+        minimize sum(yi - f(xi))^2 + lambda * integral(f''(x)^2 dx)
+
+    Useful for assessing whether the logistic form is adequate or if more
+    flexible modeling is needed.
+
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Results from logistic_regression()
+    feature : str, optional
+        Which predictor to plot. Required if multiple predictors.
+        If single predictor model, uses that predictor automatically.
+    df_values : list of float, optional
+        Effective degrees of freedom values to compare. Default is [3, 5, 10].
+        df=2 is a straight line, larger values are more flexible.
+    figsize : tuple, default=(18, 5)
+        Figure size for the panel plot
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+
+    Examples
+    --------
+    >>> result = jmp.logistic_regression(df['Status[0/1]'], df[['Schedule lag']])
+    >>> jmp.plot_logistic_spline_comparison(result)
+
+    >>> # Custom df values
+    >>> jmp.plot_logistic_spline_comparison(result, df_values=[3, 7, 15])
+    """
+    if not HAS_MATPLOTLIB:
+        print("matplotlib required for plotting")
+        return None
+
+    if df_values is None:
+        df_values = [3, 5, 10]
+
+    # Determine which feature to plot
+    if feature is None:
+        if len(result.feature_names) == 1:
+            feature = result.feature_names[0]
+        else:
+            raise ValueError(
+                f"Multiple predictors in model. Specify which feature to plot: "
+                f"{result.feature_names}"
+            )
+
+    if feature not in result.feature_names:
+        raise ValueError(f"Feature '{feature}' not in model. Available: {result.feature_names}")
+
+    # Get data
+    x_vals = result.X_clean[feature].values
+    y_binary = result.y_binary.values.astype(float)
+
+    # Evaluation grid
+    x_grid = np.linspace(x_vals.min(), x_vals.max(), 200)
+
+    # Logistic predictions on grid
+    if len(result.feature_names) == 1:
+        X_grid_df = pd.DataFrame({feature: x_grid})
+        X_grid_const = sm.add_constant(X_grid_df)
+        p_logistic = result.model.predict(X_grid_const)
+    else:
+        X_grid_df = pd.DataFrame({f: np.full(200, result.X_clean[f].mean())
+                                  for f in result.feature_names})
+        X_grid_df[feature] = x_grid
+        X_grid_ordered = X_grid_df[result.feature_names]
+        X_grid_const = sm.add_constant(X_grid_ordered, has_constant='add')
+        p_logistic = result.model.predict(X_grid_const)
+
+    n_panels = len(df_values)
+    fig, axes = plt.subplots(1, n_panels, figsize=figsize, sharey=True)
+    if n_panels == 1:
+        axes = [axes]
+
+    for ax, target_df in zip(axes, df_values):
+        spl, actual_lam, actual_df = _fit_smoothing_spline(
+            x_vals, y_binary, spline_df=target_df
+        )
+        spline_grid = np.clip(spl(x_grid), 0, 1)
+
+        # Plot data points at exact 0/1
+        ax.scatter(x_vals[y_binary == 0], y_binary[y_binary == 0],
+                   alpha=0.3, s=20, c='#d62728')
+        ax.scatter(x_vals[y_binary == 1], y_binary[y_binary == 1],
+                   alpha=0.3, s=20, c='#2ca02c')
+
+        # Logistic curve
+        ax.plot(x_grid, p_logistic, 'b-', linewidth=2.5, label='Logistic')
+
+        # Spline curve
+        ax.plot(x_grid, spline_grid, '--', color='#ff7f0e', linewidth=2.5,
+                label=f'Spline (\u03bb={actual_lam:.1f}, df={actual_df:.1f})')
+
+        ax.set_title(f'Target df = {target_df}  (actual df = {actual_df:.1f})',
+                     fontsize=12)
+        ax.set_xlabel(feature)
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    axes[0].set_ylabel(f'P({result.target_level})')
+    fig.suptitle(
+        f'Logistic Fit vs Smoothing Spline: {result.target_level} by {feature}',
+        fontsize=13, y=1.02
+    )
+    plt.tight_layout()
+    plt.show()
+
     return fig
 
 
@@ -8027,6 +8335,299 @@ def roc_curve(
     return result
 
 
+@dataclass
+class DecileAnalysisResults:
+    """
+    Results container for logistic regression decile analysis (JMP-style).
+
+    Attributes
+    ----------
+    decile_table : pd.DataFrame
+        Per-decile summary with columns: Decile, N, Events, Non_Events,
+        Actual_Rate, Mean_Pred_Prob, Min_Pred_Prob, Max_Pred_Prob,
+        Cum_Events, Cum_Pct_Events, Lift
+    n_obs : int
+        Total observations
+    n_events : int
+        Total events
+    base_rate : float
+        Overall event rate
+    """
+    decile_table: pd.DataFrame
+    n_obs: int
+    n_events: int
+    base_rate: float
+
+    def __repr__(self):
+        lines = []
+        lines.append("=" * 72)
+        lines.append("Decile Analysis (JMP-Style)")
+        lines.append("=" * 72)
+        lines.append(f"N = {self.n_obs}    Events = {self.n_events}    "
+                     f"Base Rate = {self.base_rate:.2%}")
+        lines.append("-" * 72)
+        lines.append(self.decile_table.to_string(index=False, float_format='%.4f'))
+        lines.append("=" * 72)
+        return "\n".join(lines)
+
+
+def logistic_decile_analysis(
+    result: LogisticRegressionResults,
+    n_groups: int = 10,
+    decile_column: Optional[pd.Series] = None
+) -> DecileAnalysisResults:
+    """
+    Decile analysis for logistic regression (JMP's Decile Report).
+
+    Groups observations by predicted probability and computes observed vs
+    expected event rates, cumulative gains, and lift for each group. This
+    is the standard JMP diagnostic for assessing logistic model calibration
+    and discrimination.
+
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Results from logistic_regression()
+    n_groups : int, default=10
+        Number of groups (10 = deciles). JMP uses 10 by default.
+    decile_column : pd.Series, optional
+        Pre-computed decile column (e.g., from JMP's Pred.Prob.Dec).
+        If provided, groups by this column instead of computing from
+        predicted probabilities.
+
+    Returns
+    -------
+    DecileAnalysisResults
+
+    Examples
+    --------
+    >>> result = jmp.logistic_regression(df['Status[0/1]'], df[['Schedule lag']])
+    >>> deciles = jmp.logistic_decile_analysis(result)
+    >>> print(deciles)
+    >>> print(deciles.decile_table)
+    """
+    y_binary = result.y_binary.values.astype(float)
+    pred_probs = result.predicted_probs[f'Prob[{result.target_level}]'].values
+
+    if decile_column is not None:
+        # Use pre-computed decile grouping
+        groups = decile_column.values
+        group_labels = sorted(set(groups),
+                              key=lambda x: int(''.join(filter(str.isdigit, str(x))))
+                              if any(c.isdigit() for c in str(x)) else str(x))
+    else:
+        # Create decile groups from predicted probabilities
+        try:
+            groups = pd.qcut(pred_probs, q=n_groups, labels=False, duplicates='drop') + 1
+        except ValueError:
+            groups = pd.cut(pred_probs, bins=n_groups, labels=False, duplicates='drop') + 1
+        group_labels = sorted(set(groups))
+
+    # Build per-group summary
+    rows = []
+    total_events = y_binary.sum()
+
+    for g in group_labels:
+        mask = groups == g
+        n = mask.sum()
+        events = y_binary[mask].sum()
+        non_events = n - events
+        actual_rate = events / n if n > 0 else 0
+        mean_pred = pred_probs[mask].mean()
+        min_pred = pred_probs[mask].min()
+        max_pred = pred_probs[mask].max()
+        rows.append({
+            'Decile': g,
+            'N': int(n),
+            'Events': int(events),
+            'Non_Events': int(non_events),
+            'Actual_Rate': actual_rate,
+            'Mean_Pred_Prob': mean_pred,
+            'Min_Pred_Prob': min_pred,
+            'Max_Pred_Prob': max_pred
+        })
+
+    table = pd.DataFrame(rows)
+    # Sort by mean predicted probability (highest risk first for lift calc)
+    table = table.sort_values('Mean_Pred_Prob', ascending=False).reset_index(drop=True)
+
+    # Cumulative gains (from highest predicted probability down)
+    table['Cum_Events'] = table['Events'].cumsum()
+    table['Cum_Pct_Events'] = table['Cum_Events'] / total_events
+    table['Cum_N'] = table['N'].cumsum()
+    table['Cum_Pct_N'] = table['Cum_N'] / len(y_binary)
+    table['Lift'] = table['Cum_Pct_Events'] / table['Cum_Pct_N']
+
+    return DecileAnalysisResults(
+        decile_table=table,
+        n_obs=len(y_binary),
+        n_events=int(total_events),
+        base_rate=total_events / len(y_binary)
+    )
+
+
+def plot_logistic_calibration(
+    result: LogisticRegressionResults,
+    n_groups: int = 10,
+    decile_column: Optional[pd.Series] = None,
+    figsize: Tuple[int, int] = (8, 6)
+) -> Optional[Any]:
+    """
+    Calibration plot: Actual vs Predicted event rate by decile (JMP-style).
+
+    Plots the observed event rate against the mean predicted probability
+    for each decile group. Points on the 45-degree line indicate perfect
+    calibration. This is a visual form of the Hosmer-Lemeshow test.
+
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Results from logistic_regression()
+    n_groups : int, default=10
+        Number of groups
+    decile_column : pd.Series, optional
+        Pre-computed decile column
+    figsize : tuple, default=(8, 6)
+        Figure size
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+
+    Examples
+    --------
+    >>> result = jmp.logistic_regression(df['Status[0/1]'], df[['Schedule lag']])
+    >>> jmp.plot_logistic_calibration(result)
+    """
+    if not HAS_MATPLOTLIB:
+        print("matplotlib required for plotting")
+        return None
+
+    deciles = logistic_decile_analysis(result, n_groups=n_groups,
+                                       decile_column=decile_column)
+    table = deciles.decile_table
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # 45-degree reference line
+    ax.plot([0, 1], [0, 1], 'r--', linewidth=1.5, alpha=0.7,
+            label='Perfect Calibration')
+
+    # Plot each decile as a point sized by N
+    sizes = table['N'] / table['N'].max() * 300 + 50
+    ax.scatter(table['Mean_Pred_Prob'], table['Actual_Rate'],
+               s=sizes, c='#1f77b4', edgecolors='white', linewidth=1,
+               zorder=5, label='Decile Groups')
+
+    # Label each point with decile number
+    for _, row in table.iterrows():
+        ax.annotate(f"{row['Decile']}",
+                    (row['Mean_Pred_Prob'], row['Actual_Rate']),
+                    textcoords="offset points", xytext=(8, 4),
+                    fontsize=9, color='#333333')
+
+    ax.set_xlabel(f'Mean Predicted P({result.target_level})', fontsize=12)
+    ax.set_ylabel(f'Observed Rate ({result.target_level})', fontsize=12)
+    ax.set_title(f'Calibration Plot: Actual vs Predicted by Decile\n'
+                 f'Hosmer-Lemeshow p = {result.hosmer_lemeshow["p_value"]:.4f}',
+                 fontsize=12)
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_aspect('equal')
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
+def plot_logistic_lift(
+    result: LogisticRegressionResults,
+    n_groups: int = 10,
+    decile_column: Optional[pd.Series] = None,
+    figsize: Tuple[int, int] = (14, 5)
+) -> Optional[Any]:
+    """
+    Lift chart and cumulative gains chart for logistic regression (JMP-style).
+
+    Creates two panels:
+    1. Cumulative Gains: % of events captured vs % of population screened
+       (sorted by predicted probability, highest first)
+    2. Lift: ratio of cumulative event capture rate to random selection
+
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Results from logistic_regression()
+    n_groups : int, default=10
+        Number of groups
+    decile_column : pd.Series, optional
+        Pre-computed decile column
+    figsize : tuple, default=(14, 5)
+        Figure size
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+
+    Examples
+    --------
+    >>> result = jmp.logistic_regression(df['Status[0/1]'], df[['Schedule lag']])
+    >>> jmp.plot_logistic_lift(result)
+    """
+    if not HAS_MATPLOTLIB:
+        print("matplotlib required for plotting")
+        return None
+
+    deciles = logistic_decile_analysis(result, n_groups=n_groups,
+                                       decile_column=decile_column)
+    table = deciles.decile_table
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+
+    # --- Panel 1: Cumulative Gains ---
+    cum_pct_n = np.concatenate([[0], table['Cum_Pct_N'].values])
+    cum_pct_events = np.concatenate([[0], table['Cum_Pct_Events'].values])
+
+    ax1.plot(cum_pct_n, cum_pct_events, 'b-o', linewidth=2,
+             markersize=6, label='Model')
+    ax1.plot([0, 1], [0, 1], 'r--', linewidth=1.5, alpha=0.7,
+             label='Random (No Model)')
+    ax1.fill_between(cum_pct_n, cum_pct_events,
+                     np.linspace(0, 1, len(cum_pct_n)), alpha=0.15)
+
+    ax1.set_xlabel('Cumulative % of Population', fontsize=11)
+    ax1.set_ylabel(f'Cumulative % of {result.target_level}', fontsize=11)
+    ax1.set_title('Cumulative Gains Chart', fontsize=12)
+    ax1.set_xlim(-0.02, 1.02)
+    ax1.set_ylim(-0.02, 1.02)
+    ax1.legend(fontsize=10)
+    ax1.grid(True, alpha=0.3)
+
+    # --- Panel 2: Lift Chart ---
+    decile_numbers = range(1, len(table) + 1)
+    ax2.bar(decile_numbers, table['Lift'].values, color='#1f77b4',
+            edgecolor='white', alpha=0.8)
+    ax2.axhline(y=1.0, color='r', linestyle='--', linewidth=1.5,
+                alpha=0.7, label='No Lift (Random)')
+
+    for i, lift_val in enumerate(table['Lift'].values):
+        ax2.text(i + 1, lift_val + 0.02, f'{lift_val:.2f}',
+                 ha='center', va='bottom', fontsize=9)
+
+    ax2.set_xlabel('Decile (Highest Predicted Probability First)', fontsize=11)
+    ax2.set_ylabel('Cumulative Lift', fontsize=11)
+    ax2.set_title('Lift Chart', fontsize=12)
+    ax2.set_xticks(list(decile_numbers))
+    ax2.legend(fontsize=10)
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
 def confusion_matrix_stats(
     y_true: Union[pd.Series, np.ndarray],
     y_pred: Union[pd.Series, np.ndarray],
@@ -8034,7 +8635,7 @@ def confusion_matrix_stats(
 ) -> Dict[str, Any]:
     """
     Calculate confusion matrix and classification metrics (JMP-style).
-    
+
     Parameters
     ----------
     y_true : array-like
@@ -8614,6 +9215,139 @@ class KNNResult:
             raise ValueError("predict_proba only available for classification")
         X_scaled = self.scaler.transform(X_new[self.feature_names])
         probs = self.model.predict_proba(X_scaled)
+        return pd.DataFrame(probs, index=X_new.index, columns=self.classes)
+
+
+@dataclass
+class DecisionTreeResult:
+    """
+    Results container for Decision Tree analysis (JMP-style Partition platform).
+
+    Attributes
+    ----------
+    response_type : str
+        'classification' or 'regression'
+    optimal_depth : int
+        The max_depth value with best performance on validation data
+    depth_values : np.ndarray
+        Array of max_depth values evaluated
+    train_errors : np.ndarray
+        Misclassification rates (classification) or RMSE (regression) on training data
+    validation_errors : np.ndarray
+        Misclassification rates or RMSE on validation data
+    test_errors : np.ndarray or None
+        Misclassification rates or RMSE on test data (if test set provided)
+    confusion_matrix : pd.DataFrame or None
+        Confusion matrix at optimal depth (classification only)
+    confusion_rates : pd.DataFrame or None
+        Misclassification rates by class (classification only)
+    model : object
+        Fitted DecisionTreeClassifier or DecisionTreeRegressor at optimal depth
+    predictions : pd.Series
+        Predictions on validation data at optimal depth
+    probabilities : pd.DataFrame or None
+        Class probabilities on validation data (classification only)
+    feature_names : list
+        Names of features used
+    classes : np.ndarray or None
+        Class labels (classification only)
+    summary_table : pd.DataFrame
+        Summary of performance across all depth values
+    feature_importances : pd.Series
+        Feature importance scores from the fitted tree
+    n_leaves : int
+        Number of leaf nodes in the optimal tree
+    tree_rules : str
+        Text representation of the decision tree rules
+    """
+    response_type: str
+    optimal_depth: int
+    depth_values: np.ndarray
+    train_errors: np.ndarray
+    validation_errors: np.ndarray
+    test_errors: Optional[np.ndarray]
+    confusion_matrix: Optional[pd.DataFrame]
+    confusion_rates: Optional[pd.DataFrame]
+    model: object
+    predictions: pd.Series
+    probabilities: Optional[pd.DataFrame]
+    feature_names: list
+    classes: Optional[np.ndarray]
+    summary_table: pd.DataFrame
+    feature_importances: pd.Series = None
+    n_leaves: int = 0
+    tree_rules: str = ""
+    X_train: np.ndarray = None
+    y_train: np.ndarray = None
+
+    def __repr__(self):
+        lines = []
+        lines.append("=" * 70)
+        lines.append("Decision Tree Results (JMP-Style Partition)")
+        lines.append("=" * 70)
+        lines.append(f"Response Type: {self.response_type.title()}")
+        lines.append(f"Number of Features: {len(self.feature_names)}")
+        lines.append(f"Features: {', '.join(self.feature_names[:5])}" +
+                    ("..." if len(self.feature_names) > 5 else ""))
+        lines.append(f"Number of Leaves: {self.n_leaves}")
+        lines.append("")
+
+        lines.append("-" * 70)
+        lines.append("Optimal Depth Selection")
+        lines.append("-" * 70)
+        lines.append(f"Optimal Max Depth: {self.optimal_depth}")
+
+        opt_idx = list(self.depth_values).index(self.optimal_depth) if self.optimal_depth in self.depth_values else 0
+
+        if self.response_type == 'classification':
+            lines.append(f"Training Misclassification Rate: {self.train_errors[opt_idx]:.4f}")
+            lines.append(f"Validation Misclassification Rate: {self.validation_errors[opt_idx]:.4f}")
+            if self.test_errors is not None:
+                lines.append(f"Test Misclassification Rate: {self.test_errors[opt_idx]:.4f}")
+        else:
+            lines.append(f"Training RMSE: {self.train_errors[opt_idx]:.4f}")
+            lines.append(f"Validation RMSE: {self.validation_errors[opt_idx]:.4f}")
+            if self.test_errors is not None:
+                lines.append(f"Test RMSE: {self.test_errors[opt_idx]:.4f}")
+
+        lines.append("")
+        lines.append("-" * 70)
+        lines.append("Performance Summary by Depth")
+        lines.append("-" * 70)
+        lines.append(self.summary_table.to_string(index=False))
+
+        if self.feature_importances is not None and len(self.feature_importances) > 0:
+            lines.append("")
+            lines.append("-" * 70)
+            lines.append("Feature Importances (Column Contributions)")
+            lines.append("-" * 70)
+            sorted_imp = self.feature_importances.sort_values(ascending=False)
+            for feat, imp in sorted_imp.items():
+                if imp > 0:
+                    lines.append(f"  {feat:30s} {imp:.4f}")
+
+        if self.response_type == 'classification' and self.confusion_matrix is not None:
+            lines.append("")
+            lines.append("-" * 70)
+            lines.append(f"Confusion Matrix (Depth = {self.optimal_depth})")
+            lines.append("-" * 70)
+            lines.append(self.confusion_matrix.to_string())
+            lines.append("")
+            lines.append("Confusion Rates:")
+            lines.append(self.confusion_rates.to_string(index=False))
+
+        return "\n".join(lines)
+
+    def predict(self, X_new: pd.DataFrame) -> pd.Series:
+        """Make predictions on new data."""
+        preds = self.model.predict(X_new[self.feature_names])
+        return pd.Series(preds, index=X_new.index, name='Predicted')
+
+    def predict_proba(self, X_new: pd.DataFrame) -> pd.DataFrame:
+        """Get class probabilities for new data (classification only)."""
+        if self.response_type != 'classification':
+            raise ValueError("predict_proba only available for classification")
+        probs = self.model.predict_proba(X_new[self.feature_names])
         return pd.DataFrame(probs, index=X_new.index, columns=self.classes)
 
 
@@ -9213,82 +9947,666 @@ def knn_lift_curve(
 
 
 # =============================================================================
+# DECISION TREE (JMP's Analyze > Predictive Modeling > Partition)
+# =============================================================================
+
+def decision_tree(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray],
+    validation_portion: float = 0.3,
+    validation_column: Optional[pd.Series] = None,
+    max_depth_range: Optional[range] = None,
+    max_depth: int = 10,
+    criterion: str = 'gini',
+    min_samples_split: int = 5,
+    min_samples_leaf: int = 5,
+    random_state: Optional[int] = None,
+    plot: bool = True,
+    figsize: Tuple[int, int] = (12, 5)
+) -> DecisionTreeResult:
+    """
+    Decision Tree analysis (JMP-style Partition platform).
+
+    Performs decision tree classification or regression with automatic depth
+    selection based on validation data performance, replicating JMP's
+    Partition platform (Analyze > Predictive Modeling > Partition).
+
+    Auto-detects whether to run classification or regression based on the
+    response variable type.
+
+    Parameters
+    ----------
+    y : pd.Series or np.ndarray
+        Response variable. Categorical/object for classification,
+        continuous for regression.
+    X : pd.DataFrame or np.ndarray
+        Predictor variables (factors).
+    validation_portion : float, default=0.3
+        Proportion of data to use for validation (ignored if
+        validation_column is provided).
+    validation_column : pd.Series, optional
+        Column indicating train/validation/test membership.
+        Values: 'Training'/'Validation'/'Test' (str) or 0/1/2 (int).
+        Like JMP's validation column in the Partition platform.
+    max_depth_range : range, optional
+        Specific range of max_depth values to evaluate.
+        If None, uses range(1, max_depth + 1).
+    max_depth : int, default=10
+        Maximum tree depth to evaluate.
+    criterion : str, default='gini'
+        Split criterion. For classification: 'gini' or 'entropy'.
+        For regression: 'squared_error', 'friedman_mse', or 'absolute_error'.
+    min_samples_split : int, default=5
+        Minimum samples required to split an internal node.
+    min_samples_leaf : int, default=5
+        Minimum samples required in a leaf node.
+    random_state : int, optional
+        Random seed for reproducibility. Defaults to 42 if not provided.
+    plot : bool, default=True
+        Whether to display diagnostic plots.
+    figsize : tuple, default=(12, 5)
+        Figure size for plots.
+
+    Returns
+    -------
+    DecisionTreeResult
+        Object containing all decision tree results including:
+        - optimal_depth: Best depth based on validation error
+        - confusion_matrix: For classification tasks
+        - feature_importances: Variable importance scores
+        - summary_table: Performance across all depths
+        - model: Fitted sklearn model for predictions
+
+    Examples
+    --------
+    >>> # Classification
+    >>> result = decision_tree(df['Risk'], df[['Income', 'Age', 'Credit']])
+    >>> print(result)
+
+    >>> # Regression
+    >>> result = decision_tree(df['Price'], df[['Size', 'Bedrooms']])
+
+    >>> # With JMP-style validation column
+    >>> result = decision_tree(df['y'], df[predictors],
+    ...                        validation_column=df['Validation'])
+
+    >>> # Make predictions on new data
+    >>> preds = result.predict(new_data)
+    """
+    if not HAS_SKLEARN:
+        raise ImportError(
+            "scikit-learn is required for Decision Trees. "
+            "Install with: pip install scikit-learn"
+        )
+
+    # Convert to pandas if needed
+    if isinstance(y, np.ndarray):
+        y = pd.Series(y, name='Response')
+    if isinstance(X, np.ndarray):
+        X = pd.DataFrame(X, columns=[f'X{i+1}' for i in range(X.shape[1])])
+
+    feature_names = list(X.columns)
+
+    # Determine response type
+    if y.dtype == 'object' or y.dtype.name == 'category' or y.nunique() <= 10:
+        response_type = 'classification'
+        classes = np.sort(y.unique())
+    else:
+        response_type = 'regression'
+        classes = None
+
+    # Override criterion for regression if user left the classification default
+    if response_type == 'regression' and criterion == 'gini':
+        criterion = 'squared_error'
+
+    # Handle train/validation/test split
+    if validation_column is not None:
+        val_col = validation_column.copy()
+        if val_col.dtype == 'object':
+            val_col = val_col.str.lower()
+            train_mask = val_col.isin(['training', 'train', '0'])
+            val_mask = val_col.isin(['validation', 'validate', 'valid', '1'])
+            test_mask = val_col.isin(['test', '2'])
+        else:
+            train_mask = val_col == 0
+            val_mask = val_col == 1
+            test_mask = val_col == 2
+
+        X_train = X[train_mask].copy()
+        y_train = y[train_mask].copy()
+        X_val = X[val_mask].copy()
+        y_val = y[val_mask].copy()
+
+        if test_mask.sum() > 0:
+            X_test = X[test_mask].copy()
+            y_test = y[test_mask].copy()
+            has_test = True
+        else:
+            X_test, y_test, has_test = None, None, False
+    else:
+        if random_state is None:
+            random_state = 42
+        stratify_arg = y if response_type == 'classification' else None
+        X_train, X_val, y_train, y_val = sklearn_train_test_split(
+            X, y, test_size=validation_portion, random_state=random_state,
+            stratify=stratify_arg
+        )
+        X_test, y_test, has_test = None, None, False
+
+    # Set depth range
+    if max_depth_range is None:
+        max_depth_range = range(1, max_depth + 1)
+    depth_values = np.array(list(max_depth_range))
+
+    # Evaluate across depths
+    train_errors = []
+    val_errors = []
+    test_errors_list = [] if has_test else None
+
+    for depth in depth_values:
+        if response_type == 'classification':
+            model = DecisionTreeClassifier(
+                max_depth=depth, criterion=criterion,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                random_state=random_state
+            )
+        else:
+            model = DecisionTreeRegressor(
+                max_depth=depth, criterion=criterion,
+                min_samples_split=min_samples_split,
+                min_samples_leaf=min_samples_leaf,
+                random_state=random_state
+            )
+        model.fit(X_train[feature_names], y_train)
+
+        if response_type == 'classification':
+            train_errors.append(np.mean(model.predict(X_train[feature_names]) != y_train))
+            val_errors.append(np.mean(model.predict(X_val[feature_names]) != y_val))
+            if has_test:
+                test_errors_list.append(np.mean(model.predict(X_test[feature_names]) != y_test))
+        else:
+            train_pred = model.predict(X_train[feature_names])
+            val_pred = model.predict(X_val[feature_names])
+            train_errors.append(np.sqrt(np.mean((y_train - train_pred) ** 2)))
+            val_errors.append(np.sqrt(np.mean((y_val - val_pred) ** 2)))
+            if has_test:
+                test_pred = model.predict(X_test[feature_names])
+                test_errors_list.append(np.sqrt(np.mean((y_test - test_pred) ** 2)))
+
+    train_errors = np.array(train_errors)
+    val_errors = np.array(val_errors)
+    test_errors_arr = np.array(test_errors_list) if has_test else None
+
+    # Find optimal depth
+    optimal_idx = np.argmin(val_errors)
+    optimal_depth = depth_values[optimal_idx]
+
+    # Fit final model at optimal depth
+    if response_type == 'classification':
+        final_model = DecisionTreeClassifier(
+            max_depth=optimal_depth, criterion=criterion,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            random_state=random_state
+        )
+    else:
+        final_model = DecisionTreeRegressor(
+            max_depth=optimal_depth, criterion=criterion,
+            min_samples_split=min_samples_split,
+            min_samples_leaf=min_samples_leaf,
+            random_state=random_state
+        )
+    final_model.fit(X_train[feature_names], y_train)
+
+    val_predictions = pd.Series(
+        final_model.predict(X_val[feature_names]),
+        index=X_val.index, name='Predicted'
+    )
+
+    # Feature importances
+    feature_importances = pd.Series(
+        final_model.feature_importances_,
+        index=feature_names,
+        name='Importance'
+    )
+
+    # Tree metadata
+    n_leaves = final_model.get_n_leaves()
+    tree_rules = export_text(final_model, feature_names=feature_names, max_depth=10)
+
+    # Classification-specific outputs
+    if response_type == 'classification':
+        val_probabilities = pd.DataFrame(
+            final_model.predict_proba(X_val[feature_names]),
+            index=X_val.index,
+            columns=classes
+        )
+
+        # Confusion matrix
+        conf_matrix = pd.crosstab(
+            y_val, val_predictions,
+            rownames=['Actual'], colnames=['Predicted']
+        )
+        for cls in classes:
+            if cls not in conf_matrix.index:
+                conf_matrix.loc[cls] = 0
+            if cls not in conf_matrix.columns:
+                conf_matrix[cls] = 0
+        conf_matrix = conf_matrix.loc[classes, classes]
+
+        # Confusion rates
+        rates_data = []
+        for cls in classes:
+            actual_count = (y_val == cls).sum()
+            if actual_count > 0:
+                correct = conf_matrix.loc[cls, cls] if cls in conf_matrix.index and cls in conf_matrix.columns else 0
+                incorrect = actual_count - correct
+                rates_data.append({
+                    'Actual': cls,
+                    'Count': actual_count,
+                    'Correct': correct,
+                    'Incorrect': incorrect,
+                    'Correct Rate': correct / actual_count,
+                    'Misclass Rate': incorrect / actual_count
+                })
+        confusion_rates = pd.DataFrame(rates_data)
+    else:
+        val_probabilities = None
+        conf_matrix = None
+        confusion_rates = None
+
+    # Summary table
+    summary_data = {
+        'Max Depth': depth_values,
+        'Training': train_errors,
+        'Validation': val_errors
+    }
+    if has_test:
+        summary_data['Test'] = test_errors_arr
+    summary_table = pd.DataFrame(summary_data)
+
+    if response_type == 'classification':
+        col_names = ['Max Depth', 'Train Misclass Rate', 'Valid Misclass Rate']
+        if has_test:
+            col_names.append('Test Misclass Rate')
+    else:
+        col_names = ['Max Depth', 'Train RMSE', 'Valid RMSE']
+        if has_test:
+            col_names.append('Test RMSE')
+    summary_table.columns = col_names
+
+    result = DecisionTreeResult(
+        response_type=response_type,
+        optimal_depth=int(optimal_depth),
+        depth_values=depth_values,
+        train_errors=train_errors,
+        validation_errors=val_errors,
+        test_errors=test_errors_arr,
+        confusion_matrix=conf_matrix,
+        confusion_rates=confusion_rates,
+        model=final_model,
+        predictions=val_predictions,
+        probabilities=val_probabilities,
+        feature_names=feature_names,
+        classes=classes,
+        summary_table=summary_table,
+        feature_importances=feature_importances,
+        n_leaves=n_leaves,
+        tree_rules=tree_rules,
+        X_train=X_train[feature_names].values,
+        y_train=y_train.values
+    )
+
+    if plot:
+        plot_decision_tree_results(result, figsize=figsize)
+
+    return result
+
+
+def plot_decision_tree_results(
+    result: DecisionTreeResult,
+    figsize: Tuple[int, int] = (12, 5)
+) -> Optional[Any]:
+    """
+    Plot Decision Tree results (JMP-style).
+
+    Creates error rate by depth plot and confusion matrix heatmap.
+
+    Parameters
+    ----------
+    result : DecisionTreeResult
+        Results from decision_tree()
+    figsize : tuple, default=(12, 5)
+        Figure size
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+    """
+    if not HAS_MATPLOTLIB:
+        print("matplotlib is required for plotting. Install with: pip install matplotlib")
+        return None
+
+    has_conf = (result.response_type == 'classification' and
+                result.confusion_matrix is not None)
+    n_plots = 2 if has_conf else 1
+    fig, axes = plt.subplots(1, n_plots, figsize=figsize)
+    if n_plots == 1:
+        axes = [axes]
+
+    # Plot 1: Error rates vs depth
+    ax1 = axes[0]
+    ax1.plot(result.depth_values, result.train_errors, 'b-o',
+             label='Training', markersize=5, linewidth=1.5)
+    ax1.plot(result.depth_values, result.validation_errors, 'r-s',
+             label='Validation', markersize=5, linewidth=1.5)
+    if result.test_errors is not None:
+        ax1.plot(result.depth_values, result.test_errors, 'g-^',
+                 label='Test', markersize=5, linewidth=1.5)
+
+    ax1.axvline(x=result.optimal_depth, color='gray', linestyle='--',
+                alpha=0.7, label=f'Optimal Depth = {result.optimal_depth}')
+    opt_idx = list(result.depth_values).index(result.optimal_depth) \
+        if result.optimal_depth in result.depth_values else 0
+    ax1.scatter([result.optimal_depth],
+                [result.validation_errors[opt_idx]],
+                s=150, c='red', marker='*', zorder=5, edgecolors='black')
+
+    ylabel = 'Misclassification Rate' if result.response_type == 'classification' else 'RMSE'
+    ax1.set_ylabel(ylabel, fontsize=11)
+    ax1.set_xlabel('Max Depth', fontsize=11)
+    ax1.set_title(f'Decision Tree — {ylabel} by Depth', fontsize=12)
+    ax1.legend(loc='best', fontsize=10)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xticks(result.depth_values)
+
+    # Plot 2: Confusion matrix heatmap (classification only)
+    if has_conf:
+        ax2 = axes[1]
+        conf_arr = result.confusion_matrix.values.astype(float)
+        im = ax2.imshow(conf_arr, interpolation='nearest', cmap='Blues')
+        ax2.set_xticks(range(len(result.classes)))
+        ax2.set_yticks(range(len(result.classes)))
+        ax2.set_xticklabels(result.classes, fontsize=10)
+        ax2.set_yticklabels(result.classes, fontsize=10)
+        ax2.set_xlabel('Predicted', fontsize=11)
+        ax2.set_ylabel('Actual', fontsize=11)
+        ax2.set_title(f'Confusion Matrix (Depth = {result.optimal_depth})', fontsize=12)
+
+        for i in range(len(result.classes)):
+            for j in range(len(result.classes)):
+                val = int(conf_arr[i, j])
+                color = 'white' if val > conf_arr.max() / 2 else 'black'
+                ax2.text(j, i, str(val), ha='center', va='center',
+                         color=color, fontsize=12, fontweight='bold')
+        fig.colorbar(im, ax=ax2, shrink=0.8)
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
+def decision_tree_classification(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray],
+    validation_portion: float = 0.3,
+    validation_column: Optional[pd.Series] = None,
+    max_depth_range: Optional[range] = None,
+    max_depth: int = 10,
+    criterion: str = 'gini',
+    min_samples_split: int = 5,
+    min_samples_leaf: int = 5,
+    random_state: Optional[int] = None,
+    plot: bool = True,
+    figsize: Tuple[int, int] = (12, 5)
+) -> DecisionTreeResult:
+    """
+    Decision Tree Classification (JMP-style Partition).
+
+    Convenience wrapper for decision_tree() for classification tasks.
+
+    Parameters
+    ----------
+    y : pd.Series or np.ndarray
+        Categorical response variable.
+    X : pd.DataFrame or np.ndarray
+        Predictor variables.
+    validation_portion : float, default=0.3
+        Proportion for validation.
+    validation_column : pd.Series, optional
+        JMP-style train/validation/test column.
+    max_depth_range : range, optional
+        Range of depths to evaluate.
+    max_depth : int, default=10
+        Maximum depth to evaluate.
+    criterion : str, default='gini'
+        Split criterion ('gini' or 'entropy').
+    min_samples_split : int, default=5
+        Minimum samples to split a node.
+    min_samples_leaf : int, default=5
+        Minimum samples in a leaf.
+    random_state : int, optional
+        Random seed.
+    plot : bool, default=True
+        Whether to display plots.
+    figsize : tuple, default=(12, 5)
+        Figure size.
+
+    Returns
+    -------
+    DecisionTreeResult
+
+    Examples
+    --------
+    >>> result = decision_tree_classification(df['Risk'], df[['Income', 'Age']])
+    >>> print(result.confusion_matrix)
+    """
+    return decision_tree(
+        y=y, X=X, validation_portion=validation_portion,
+        validation_column=validation_column,
+        max_depth_range=max_depth_range, max_depth=max_depth,
+        criterion=criterion, min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf, random_state=random_state,
+        plot=plot, figsize=figsize
+    )
+
+
+def decision_tree_regression(
+    y: Union[pd.Series, np.ndarray],
+    X: Union[pd.DataFrame, np.ndarray],
+    validation_portion: float = 0.3,
+    validation_column: Optional[pd.Series] = None,
+    max_depth_range: Optional[range] = None,
+    max_depth: int = 10,
+    criterion: str = 'squared_error',
+    min_samples_split: int = 5,
+    min_samples_leaf: int = 5,
+    random_state: Optional[int] = None,
+    plot: bool = True,
+    figsize: Tuple[int, int] = (12, 5)
+) -> DecisionTreeResult:
+    """
+    Decision Tree Regression (JMP-style Partition).
+
+    Convenience wrapper for decision_tree() for regression tasks.
+
+    Parameters
+    ----------
+    y : pd.Series or np.ndarray
+        Continuous response variable.
+    X : pd.DataFrame or np.ndarray
+        Predictor variables.
+    validation_portion : float, default=0.3
+        Proportion for validation.
+    validation_column : pd.Series, optional
+        JMP-style train/validation/test column.
+    max_depth_range : range, optional
+        Range of depths to evaluate.
+    max_depth : int, default=10
+        Maximum depth to evaluate.
+    criterion : str, default='squared_error'
+        Split criterion ('squared_error', 'friedman_mse', 'absolute_error').
+    min_samples_split : int, default=5
+        Minimum samples to split a node.
+    min_samples_leaf : int, default=5
+        Minimum samples in a leaf.
+    random_state : int, optional
+        Random seed.
+    plot : bool, default=True
+        Whether to display plots.
+    figsize : tuple, default=(12, 5)
+        Figure size.
+
+    Returns
+    -------
+    DecisionTreeResult
+
+    Examples
+    --------
+    >>> result = decision_tree_regression(df['Price'], df[['Size', 'Rooms']])
+    >>> print(f"Optimal Depth: {result.optimal_depth}")
+    """
+    return decision_tree(
+        y=y, X=X, validation_portion=validation_portion,
+        validation_column=validation_column,
+        max_depth_range=max_depth_range, max_depth=max_depth,
+        criterion=criterion, min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf, random_state=random_state,
+        plot=plot, figsize=figsize
+    )
+
+
+def save_decision_tree_predictions(
+    result: DecisionTreeResult,
+    X: pd.DataFrame,
+    y: Optional[pd.Series] = None
+) -> pd.DataFrame:
+    """
+    Save Decision Tree predictions to a DataFrame (like JMP's Save Predicteds).
+
+    Parameters
+    ----------
+    result : DecisionTreeResult
+        Fitted Decision Tree result from decision_tree().
+    X : pd.DataFrame
+        Data to predict on (must have same columns as training data).
+    y : pd.Series, optional
+        Actual values (for computing accuracy).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with predictions and, for classification, class probabilities.
+
+    Examples
+    --------
+    >>> result = decision_tree(df['Risk'], df[predictors])
+    >>> pred_df = save_decision_tree_predictions(result, df[predictors], df['Risk'])
+    >>> print(pred_df.head())
+    """
+    predictions = result.model.predict(X[result.feature_names])
+    output = pd.DataFrame(index=X.index)
+    output['Predicted'] = predictions
+
+    if result.response_type == 'classification':
+        probs = result.model.predict_proba(X[result.feature_names])
+        for i, cls in enumerate(result.classes):
+            output[f'Prob[{cls}]'] = probs[:, i]
+        output['Most Likely'] = predictions
+        if y is not None:
+            output['Actual'] = y.values
+            output['Correct'] = (predictions == y.values).astype(int)
+    else:
+        if y is not None:
+            output['Actual'] = y.values
+            output['Residual'] = y.values - predictions
+
+    return output
+
+
+# =============================================================================
 # MODULE EXPORTS
 # =============================================================================
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 __all__ = [
     # Data classes
     'DescriptiveStats', 'NormalityTest', 'RegressionResults', 'ResidualDiagnostics',
-    'CorrelationResults', 'ANOVAResults', 'TTestResults', 
+    'CorrelationResults', 'ANOVAResults', 'TTestResults',
     'HatMatrixResults', 'SubsetRegressionResults', 'StepwiseResults',
     'CovariateCombinations', 'PredictionIntervalResults',
     'TrainTestSplit', 'ModelValidationResults', 'ModelComparisonResults',
-    
+
     # NEW v2.0 Data classes
     'PredictionProfiler', 'ARIMAResults', 'ExponentialSmoothingResults',
     'TimeSeriesDecomposition', 'AutocorrelationResults',
     'FactorialDesignResults', 'EffectScreeningResults', 'ResponseSurfaceResults',
-    
+
     # Data import
     'read_csv', 'read_excel',
-    
+
     # Core analysis
     'describe', 'test_normality', 'linear_regression', 'linear_regression_formula',
-    'residual_diagnostics', 'prediction_interval', 'correlation', 'correlation_matrix', 
+    'residual_diagnostics', 'prediction_interval', 'correlation', 'correlation_matrix',
     'oneway_anova', 'ttest_1sample', 'ttest_2sample', 'ttest_paired',
     'normal_probability',
-    
+
     # Hat matrix and influence
     'hat_matrix',
-    
+
     # Model selection
-    'subset_regression', 'stepwise_regression', 
+    'subset_regression', 'stepwise_regression',
     'stepwise_regression_enhanced', 'compare_stepwise_criteria',
-    
+
     # Covariate combinations / feature engineering
     'covariate_combinations', 'full_factorial_design', 'polynomial_features',
-    
+
     # Train/test validation (JMP-style)
-    'train_test_split', 'make_validation_column', 'validate_model', 'compare_models', 
+    'train_test_split', 'make_validation_column', 'validate_model', 'compare_models',
     'compare_all_criteria', 'plot_train_test_comparison', 'plot_model_comparison',
-    
+
     # Convenience functions
     'fit_y_by_x', 'fit_model', 'distribution_analysis', 'multivariate_analysis',
-    
+
     # Visualization
     'plot_distribution', 'plot_regression_diagnostics', 'plot_scatter_with_regression',
     'plot_correlation_matrix', 'plot_control_chart',
-    
+
     # NEW v2.0: Interactive Visualization / Leverage Plots
     'plot_leverage_interactive', 'plot_influence_dashboard', 'plot_partial_regression',
     'plot_added_variable', 'plot_component_residual',
-    
+
     # NEW v2.0: Prediction Profiler
     'prediction_profiler', 'plot_prediction_profiler',
-    
+
     # NEW v2.0: Design of Experiments (DoE)
     'fractional_factorial_design', 'response_surface_design', 'optimal_design',
     'analyze_factorial', 'effect_screening', 'interaction_plot', 'main_effects_plot',
     'contour_profiler', 'pareto_of_effects',
-    
+
     # NEW v2.0: Time Series Analysis
     'arima', 'exponential_smoothing', 'autocorrelation_analysis',
     'seasonal_decomposition', 'time_series_forecast', 'plot_time_series_diagnostics',
     'adf_test', 'kpss_test', 'ljung_box_test', 'plot_acf_pacf',
-    
+
     # NEW v2.5.0: K Nearest Neighbors
     'KNNResult', 'k_nearest_neighbors', 'knn_classification', 'knn_regression',
     'plot_knn_results', 'save_knn_predictions', 'knn_lift_curve',
-    
+
     # NEW v2.5.0: Bootstrap Methods
     'BootstrapResults', 'bootstrap', 'bootstrap_rmse', 'plot_bootstrap_distribution',
-    
+
     # NEW v2.5.0: Logistic Regression
     'LogisticRegressionResults', 'logistic_regression', 'plot_logistic_diagnostics',
-    'plot_logistic_bivariate', 'plot_logistic_roc', 'roc_curve', 'confusion_matrix_stats', 
+    'plot_logistic_bivariate', 'plot_logistic_roc', 'roc_curve', 'confusion_matrix_stats',
     'save_logistic_predictions',
-    
+
+    # NEW v2.6.0: Decision Trees (Partition)
+    'DecisionTreeResult', 'decision_tree', 'decision_tree_classification',
+    'decision_tree_regression', 'plot_decision_tree_results',
+    'save_decision_tree_predictions',
+
     # Utilities
     'detect_outliers', 'recode', 'log_transform',
 ]
