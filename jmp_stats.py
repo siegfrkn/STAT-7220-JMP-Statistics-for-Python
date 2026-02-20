@@ -333,6 +333,48 @@ def _to_2d_array(X):
     return X.reshape(-1, 1) if X.ndim == 1 else X
 
 
+def _confusion_counts(y_true, y_pred):
+    """Compute TP, TN, FP, FN from aligned binary (0/1) arrays."""
+    tp = int(((y_pred == 1) & (y_true == 1)).sum())
+    tn = int(((y_pred == 0) & (y_true == 0)).sum())
+    fp = int(((y_pred == 1) & (y_true == 0)).sum())
+    fn = int(((y_pred == 0) & (y_true == 1)).sum())
+    return tp, tn, fp, fn
+
+
+def _confusion_metrics(tp, tn, fp, fn):
+    """Derive classification metrics from TP/TN/FP/FN counts."""
+    n = tp + tn + fp + fn
+    accuracy = (tp + tn) / n if n > 0 else 0.0
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    npv = tn / (tn + fn) if (tn + fn) > 0 else 0.0
+    f1 = (2 * precision * sensitivity / (precision + sensitivity)
+          if (precision + sensitivity) > 0 else 0.0)
+    return {
+        'accuracy': accuracy,
+        'misclassification_rate': 1.0 - accuracy,
+        'sensitivity': sensitivity,
+        'specificity': specificity,
+        'precision': precision,
+        'npv': npv,
+        'f1': f1,
+    }
+
+
+def _roc_curve_points(y_true, y_prob, n_thresholds=200):
+    """Compute ROC curve (FPR, TPR arrays) over a grid of thresholds."""
+    thresholds = np.linspace(0, 1, n_thresholds)
+    tpr_list, fpr_list = [], []
+    for thresh in thresholds:
+        y_pred = (y_prob >= thresh).astype(int)
+        tp, tn, fp, fn = _confusion_counts(y_true, y_pred)
+        tpr_list.append(tp / (tp + fn) if (tp + fn) > 0 else 0.0)
+        fpr_list.append(fp / (fp + tn) if (fp + tn) > 0 else 0.0)
+    return np.array(fpr_list), np.array(tpr_list), thresholds
+
+
 # =============================================================================
 # DATA CLASSES FOR STRUCTURED OUTPUT
 # =============================================================================
@@ -7395,14 +7437,11 @@ def logistic_regression(
     # Classification metrics
     # ==========================================================================
     y_pred_binary = (prob_target >= threshold).astype(int)
-    tp = ((y_pred_binary == 1) & (y_binary == 1)).sum()
-    tn = ((y_pred_binary == 0) & (y_binary == 0)).sum()
-    fp = ((y_pred_binary == 1) & (y_binary == 0)).sum()
-    fn = ((y_pred_binary == 0) & (y_binary == 1)).sum()
-    
-    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-    
+    tp, tn, fp, fn = _confusion_counts(y_binary.values, y_pred_binary.values)
+    _cm = _confusion_metrics(tp, tn, fp, fn)
+    sensitivity = _cm['sensitivity']
+    specificity = _cm['specificity']
+
     # AUC
     auc = _calculate_auc(y_binary.values, prob_target.values)
     
@@ -7554,21 +7593,8 @@ def plot_logistic_diagnostics(
     y_true = result.y_binary.values
     y_prob = result.predicted_probs[f'Prob[{result.target_level}]'].values
     
-    thresholds = np.linspace(0, 1, 200)
-    tpr_list, fpr_list = [], []
-    
-    for thresh in thresholds:
-        y_pred = (y_prob >= thresh).astype(int)
-        tp = ((y_pred == 1) & (y_true == 1)).sum()
-        fn = ((y_pred == 0) & (y_true == 1)).sum()
-        fp = ((y_pred == 1) & (y_true == 0)).sum()
-        tn = ((y_pred == 0) & (y_true == 0)).sum()
-        
-        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
-        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
-        tpr_list.append(tpr)
-        fpr_list.append(fpr)
-    
+    fpr_list, tpr_list, thresholds = _roc_curve_points(y_true, y_prob, 200)
+
     ax2.plot(fpr_list, tpr_list, 'b-', linewidth=2, label=f'ROC (AUC = {result.auc:.4f})')
     ax2.plot([0, 1], [0, 1], 'r--', linewidth=1, label='Random')
     ax2.fill_between(np.array(fpr_list)[np.argsort(fpr_list)], 
@@ -8195,25 +8221,12 @@ def plot_logistic_roc(
     y_prob = result.predicted_probs[f'Prob[{result.target_level}]']
     
     # Calculate ROC curve points
-    thresholds = np.linspace(0, 1, 100)
-    tpr_list, fpr_list = [], []
-    
-    for thresh in thresholds:
-        y_pred = (y_prob >= thresh).astype(int)
-        tp = ((y_pred == 1) & (y_true == 1)).sum()
-        fn = ((y_pred == 0) & (y_true == 1)).sum()
-        fp = ((y_pred == 1) & (y_true == 0)).sum()
-        tn = ((y_pred == 0) & (y_true == 0)).sum()
-        
-        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
-        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
-        tpr_list.append(tpr)
-        fpr_list.append(fpr)
-    
+    fpr_list, tpr_list, thresholds = _roc_curve_points(y_true, y_prob, 100)
+
     # Calculate AUC using trapezoidal rule
     sorted_indices = np.argsort(fpr_list)
-    fpr_sorted = np.array(fpr_list)[sorted_indices]
-    tpr_sorted = np.array(tpr_list)[sorted_indices]
+    fpr_sorted = fpr_list[sorted_indices]
+    tpr_sorted = tpr_list[sorted_indices]
     auc = np.trapz(tpr_sorted, fpr_sorted)
     
     ax1.plot(fpr_list, tpr_list, 'b-', linewidth=2, label=f'ROC Curve (AUC = {auc:.4f})')
@@ -8304,25 +8317,12 @@ def roc_curve(
     y_prob = y_prob[mask]
     
     # Calculate ROC points
-    thresholds = np.linspace(0, 1, 200)
-    tpr_list, fpr_list = [], []
-    
-    for thresh in thresholds:
-        y_pred = (y_prob >= thresh).astype(int)
-        tp = ((y_pred == 1) & (y_binary == 1)).sum()
-        fn = ((y_pred == 0) & (y_binary == 1)).sum()
-        fp = ((y_pred == 1) & (y_binary == 0)).sum()
-        tn = ((y_pred == 0) & (y_binary == 0)).sum()
-        
-        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
-        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
-        tpr_list.append(tpr)
-        fpr_list.append(fpr)
-    
+    fpr_list, tpr_list, thresholds = _roc_curve_points(y_binary, y_prob, 200)
+
     # Calculate AUC
     sorted_indices = np.argsort(fpr_list)
-    fpr_sorted = np.array(fpr_list)[sorted_indices]
-    tpr_sorted = np.array(tpr_list)[sorted_indices]
+    fpr_sorted = fpr_list[sorted_indices]
+    tpr_sorted = tpr_list[sorted_indices]
     auc = np.trapz(tpr_sorted, fpr_sorted)
     
     result = {
@@ -8672,52 +8672,40 @@ def confusion_matrix_stats(
     """
     y_true = np.asarray(y_true)
     y_pred = np.asarray(y_pred)
-    
+
     # Get unique labels
     labels = sorted(np.unique(np.concatenate([y_true, y_pred])))
-    
+
     if positive_label is None:
         positive_label = labels[-1]
     negative_label = [l for l in labels if l != positive_label][0]
-    
-    # Calculate confusion matrix values
-    tp = ((y_pred == positive_label) & (y_true == positive_label)).sum()
-    tn = ((y_pred == negative_label) & (y_true == negative_label)).sum()
-    fp = ((y_pred == positive_label) & (y_true == negative_label)).sum()
-    fn = ((y_pred == negative_label) & (y_true == positive_label)).sum()
-    
-    # Calculate metrics
-    n = len(y_true)
-    accuracy = (tp + tn) / n if n > 0 else 0
-    misclassification = 1 - accuracy
-    
-    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0  # True Positive Rate / Recall
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0  # True Negative Rate
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0    # Positive Predictive Value
-    npv = tn / (tn + fn) if (tn + fn) > 0 else 0          # Negative Predictive Value
-    
-    f1 = 2 * (precision * sensitivity) / (precision + sensitivity) if (precision + sensitivity) > 0 else 0
-    
+
+    # Convert categorical labels to binary and compute metrics
+    y_true_bin = (y_true == positive_label).astype(int)
+    y_pred_bin = (y_pred == positive_label).astype(int)
+    tp, tn, fp, fn = _confusion_counts(y_true_bin, y_pred_bin)
+    m = _confusion_metrics(tp, tn, fp, fn)
+
     # Create confusion matrix DataFrame
     conf_matrix = pd.DataFrame(
         [[tn, fp], [fn, tp]],
         index=[f'Actual: {negative_label}', f'Actual: {positive_label}'],
         columns=[f'Pred: {negative_label}', f'Pred: {positive_label}']
     )
-    
+
     return {
         'confusion_matrix': conf_matrix,
         'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn,
-        'accuracy': accuracy,
-        'misclassification_rate': misclassification,
-        'sensitivity': sensitivity,  # Recall, True Positive Rate
-        'specificity': specificity,  # True Negative Rate
-        'precision': precision,      # Positive Predictive Value
-        'npv': npv,                  # Negative Predictive Value
-        'f1_score': f1,
+        'accuracy': m['accuracy'],
+        'misclassification_rate': m['misclassification_rate'],
+        'sensitivity': m['sensitivity'],
+        'specificity': m['specificity'],
+        'precision': m['precision'],
+        'npv': m['npv'],
+        'f1_score': m['f1'],
         'positive_label': positive_label,
         'negative_label': negative_label,
-        'n': n
+        'n': len(y_true)
     }
 
 
@@ -10599,16 +10587,11 @@ def confusion_matrix_at_cutoff(
 
     # Re-classify at the new cutoff
     y_pred_binary = (prob_target >= cutoff).astype(int)
-
-    tp = int(((y_pred_binary == 1) & (y_binary == 1)).sum())
-    tn = int(((y_pred_binary == 0) & (y_binary == 0)).sum())
-    fp = int(((y_pred_binary == 1) & (y_binary == 0)).sum())
-    fn = int(((y_pred_binary == 0) & (y_binary == 1)).sum())
-
-    n = tp + tn + fp + fn
-    misclass = (fp + fn) / n if n > 0 else 0.0
-    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    tp, tn, fp, fn = _confusion_counts(y_binary.values, y_pred_binary.values)
+    m = _confusion_metrics(tp, tn, fp, fn)
+    sensitivity = m['sensitivity']
+    specificity = m['specificity']
+    misclass = m['misclassification_rate']
     fpr = 1.0 - specificity
     fnr = 1.0 - sensitivity
 
