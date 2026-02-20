@@ -9,6 +9,13 @@ matplotlib/seaborn for visualization.
 Installation Requirements:
     pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn patsy
 
+NEW IN v2.8.0:
+    - confusion_matrix_at_cutoff(): JMP-style confusion matrix at any probability
+      cutoff with Predicted Count, Predicted Rate, FPR, FNR
+    - plot_binary_smooth(): Nonparametric smooth of binary Y vs continuous X
+      (LOWESS or spline) for checking logistic model adequacy — matches JMP's
+      Bivariate platform Kernel Smoother / Fit Spline
+
 NEW IN v2.7.0:
     - STAT 7230: ADVANCED REGRESSION & CLASSIFICATION UTILITIES:
         - ci_mean(): Confidence interval for a sample mean (normal approximation)
@@ -10537,6 +10544,255 @@ def save_decision_tree_predictions(
 # =============================================================================
 
 
+def confusion_matrix_at_cutoff(
+    result: LogisticRegressionResults,
+    cutoff: float = 0.5,
+    verbose: bool = True
+) -> Dict[str, Any]:
+    """
+    Re-classify logistic regression predictions at a custom probability cutoff
+    and display JMP-style Confusion Matrix and Confusion Rates reports.
+
+    JMP's confusion matrix output consists of two side-by-side tables:
+    - **Predicted Count**: Raw counts (rows = Actual, columns = Predicted)
+    - **Predicted Rate**: Each count divided by its row total
+
+    The off-diagonal rates directly give:
+    - False Positive Rate (row for negative actual, predicted-positive column)
+    - False Negative Rate (row for positive actual, predicted-negative column)
+
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Results object from logistic_regression()
+    cutoff : float, default=0.5
+        Probability threshold. Observations with P(target) >= cutoff are
+        classified as the target (positive) level.
+    verbose : bool, default=True
+        Whether to print JMP-style tables and metrics
+
+    Returns
+    -------
+    dict
+        'predicted_count'       : pd.DataFrame — raw confusion matrix
+        'predicted_rate'        : pd.DataFrame — row-proportioned matrix
+        'tp', 'tn', 'fp', 'fn' : int — cell counts
+        'misclassification_rate': float
+        'sensitivity'           : float — TP / (TP + FN)
+        'specificity'           : float — TN / (TN + FP)
+        'false_positive_rate'   : float — FP / (FP + TN) = 1 − specificity
+        'false_negative_rate'   : float — FN / (FN + TP) = 1 − sensitivity
+
+    Examples
+    --------
+    >>> result = jmp.logistic_regression(df['Y'], df[['X']], plot=False)
+    >>> stats = jmp.confusion_matrix_at_cutoff(result, cutoff=0.015)
+    >>> print(f"FPR: {stats['false_positive_rate']:.4f}")
+    >>> print(f"FNR: {stats['false_negative_rate']:.4f}")
+    """
+    target = result.target_level
+    other = result.other_level
+    prob_col = f'Prob[{target}]'
+
+    prob_target = result.predicted_probs[prob_col]
+    y_binary = result.y_binary
+
+    # Re-classify at the new cutoff
+    y_pred_binary = (prob_target >= cutoff).astype(int)
+
+    tp = int(((y_pred_binary == 1) & (y_binary == 1)).sum())
+    tn = int(((y_pred_binary == 0) & (y_binary == 0)).sum())
+    fp = int(((y_pred_binary == 1) & (y_binary == 0)).sum())
+    fn = int(((y_pred_binary == 0) & (y_binary == 1)).sum())
+
+    n = tp + tn + fp + fn
+    misclass = (fp + fn) / n if n > 0 else 0.0
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    fpr = 1.0 - specificity
+    fnr = 1.0 - sensitivity
+
+    # JMP-style Predicted Count table (rows=Actual, cols=Predicted)
+    predicted_count = pd.DataFrame(
+        [[tn, fp], [fn, tp]],
+        index=pd.Index([other, target], name='Actual'),
+        columns=pd.Index([other, target], name='Predicted')
+    )
+
+    # JMP-style Predicted Rate table (each cell / row total)
+    row_totals = predicted_count.sum(axis=1)
+    predicted_rate = predicted_count.div(row_totals, axis=0)
+
+    if verbose:
+        print(f"Confusion Matrix at Cutoff = {cutoff}")
+        print("=" * 50)
+        print(f"\nPredicted Count")
+        print(predicted_count.to_string())
+        print(f"\nPredicted Rate")
+        print(predicted_rate.round(4).to_string())
+        print(f"\nMisclassification Rate : {misclass:.4f}")
+        print(f"Sensitivity (1 − FNR)  : {sensitivity:.4f}")
+        print(f"Specificity (1 − FPR)  : {specificity:.4f}")
+        print(f"False Positive Rate    : {fpr:.4f}")
+        print(f"False Negative Rate    : {fnr:.4f}")
+
+    return {
+        'predicted_count': predicted_count,
+        'predicted_rate': predicted_rate,
+        'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn,
+        'misclassification_rate': misclass,
+        'sensitivity': sensitivity,
+        'specificity': specificity,
+        'false_positive_rate': fpr,
+        'false_negative_rate': fnr,
+    }
+
+
+def plot_binary_smooth(
+    y,
+    x,
+    smoother: str = 'lowess',
+    frac: float = 0.4,
+    spline_lambda: Optional[float] = None,
+    spline_df: Optional[float] = None,
+    show_logistic: bool = True,
+    ylim: Optional[Tuple[float, float]] = None,
+    xlabel: Optional[str] = None,
+    ylabel: Optional[str] = None,
+    title: Optional[str] = None,
+    figsize: Tuple[int, int] = (10, 6)
+) -> Optional[Any]:
+    """
+    Plot a binary outcome (0/1) against a continuous predictor with a
+    nonparametric smoother overlay — matching JMP's Bivariate platform.
+
+    When a numerical 0/1 variable is placed in JMP's Fit Y by X, the
+    Bivariate platform opens and offers two smoothers under Flexible:
+
+    - **Kernel Smoother** (LOWESS, Cleveland 1979) — locally weighted
+      scatterplot smoothing with tri-cube weights.  Controlled by
+      *alpha* (fraction of data per local window).
+    - **Fit Spline** (Reinsch 1967) — penalized cubic smoothing spline.
+      Controlled by *lambda* (smoothing penalty).
+
+    The resulting smooth estimates P(Y=1|X) nonparametrically. Comparing
+    it to the parametric logistic curve reveals departures from the
+    linearity-in-log-odds assumption.
+
+    Parameters
+    ----------
+    y : array-like
+        Binary outcome (0/1 or boolean)
+    x : array-like
+        Continuous predictor variable
+    smoother : {'lowess', 'spline'}, default='lowess'
+        Which nonparametric smoother to use.
+        'lowess' matches JMP's Kernel Smoother (Cleveland 1979).
+        'spline' matches JMP's Fit Spline (Reinsch 1967).
+    frac : float, default=0.4
+        LOWESS bandwidth (fraction of data used per local fit).
+        Only used when smoother='lowess'. JMP calls this *alpha*.
+    spline_lambda : float, optional
+        Smoothing penalty for the spline. Only used when smoother='spline'.
+    spline_df : float, optional
+        Target effective degrees of freedom for the spline.
+        Only used when smoother='spline'.
+    show_logistic : bool, default=True
+        Whether to overlay the parametric logistic regression fit
+    ylim : tuple of (ymin, ymax), optional
+        Y-axis limits. Use e.g. (0, 0.05) to zoom into the low-probability
+        region for rare-event diagnostics.
+    xlabel : str, optional
+        X-axis label. Default: 'X'
+    ylabel : str, optional
+        Y-axis label. Default: 'P(Y=1)'
+    title : str, optional
+        Plot title. Default: auto-generated
+    figsize : tuple, default=(10, 6)
+        Figure size
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+
+    Examples
+    --------
+    >>> jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'])
+
+    >>> # Zoom into low-probability region
+    >>> jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'],
+    ...                        ylim=(0, 0.05))
+
+    >>> # Use spline instead of LOWESS
+    >>> jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'],
+    ...                        smoother='spline', spline_df=5)
+    """
+    if not HAS_MATPLOTLIB:
+        print("matplotlib required for plotting")
+        return None
+
+    y = np.asarray(y).ravel().astype(float)
+    x = np.asarray(x).ravel().astype(float)
+
+    # Drop NaNs (paired)
+    mask = ~(np.isnan(y) | np.isnan(x))
+    y, x = y[mask], x[mask]
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Scatter of raw 0/1 observations
+    ax.scatter(x, y, alpha=0.15, s=15, c='steelblue', edgecolors='none',
+               label='Observations')
+
+    # Smooth curve
+    x_min, x_max = x.min(), x.max()
+
+    if smoother == 'lowess':
+        from statsmodels.nonparametric.smoothers_lowess import lowess
+        smoothed = lowess(y, x, frac=frac, return_sorted=True)
+        ax.plot(smoothed[:, 0], smoothed[:, 1], color='#ff7f0e',
+                linewidth=2.5, label=f'LOWESS (frac={frac})')
+    elif smoother == 'spline':
+        spline_obj, lam, edf = _fit_smoothing_spline(
+            x, y, spline_lambda=spline_lambda, spline_df=spline_df
+        )
+        x_grid = np.linspace(x_min, x_max, 300)
+        y_spline = np.clip(spline_obj(x_grid), 0, 1)
+        ax.plot(x_grid, y_spline, color='#ff7f0e', linewidth=2.5,
+                linestyle='--',
+                label=f'Spline (\u03bb={lam:.1f}, df={edf:.1f})')
+    else:
+        raise ValueError(f"smoother must be 'lowess' or 'spline', got '{smoother}'")
+
+    # Optional parametric logistic overlay
+    if show_logistic and HAS_STATSMODELS:
+        X_design = sm.add_constant(x)
+        try:
+            logit_fit = sm.Logit(y, X_design).fit(disp=0)
+            x_grid = np.linspace(x_min, x_max, 300)
+            X_grid = sm.add_constant(x_grid)
+            p_logistic = logit_fit.predict(X_grid)
+            ax.plot(x_grid, p_logistic, 'b-', linewidth=2,
+                    label='Logistic Fit')
+        except Exception:
+            pass  # silently skip if logistic fit fails
+
+    ax.set_xlabel(xlabel or 'X', fontsize=12)
+    ax.set_ylabel(ylabel or 'P(Y=1)', fontsize=12)
+    ax.set_title(title or 'Binary Smooth: Checking Logistic Model Adequacy',
+                 fontsize=12)
+
+    if ylim is not None:
+        ax.set_ylim(ylim)
+
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+    return fig
+
+
 def ci_mean(data, level=0.95, decimals=2, verbose=True):
     """
     Confidence interval for a sample mean using the t-distribution.
@@ -11045,7 +11301,7 @@ def compare_classifiers(df, formula_simple, formula_full,
 # MODULE EXPORTS
 # =============================================================================
 
-__version__ = "2.7.0"
+__version__ = "2.8.0"
 __all__ = [
     # Data classes
     'DescriptiveStats', 'NormalityTest', 'RegressionResults', 'ResidualDiagnostics',
@@ -11126,6 +11382,9 @@ __all__ = [
     # NEW v2.7.0: STAT 7230 Advanced Utilities
     'ci_mean', 'lr_test', 'abline', 'qq_plot', 'rmse_from_model',
     'tukey_lsmeans', 'compare_classifiers',
+
+    # NEW v2.8.0: Custom Cutoff & Binary Smooth
+    'confusion_matrix_at_cutoff', 'plot_binary_smooth',
 
     # Utilities
     'detect_outliers', 'recode', 'log_transform',

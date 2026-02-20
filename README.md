@@ -1,7 +1,7 @@
 # JMP-Stats: JMP-Style Statistical Analysis for Python
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Version 2.7.0](https://img.shields.io/badge/version-2.7.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
+[![Version 2.8.0](https://img.shields.io/badge/version-2.8.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
 
 A comprehensive Python library that replicates JMP's statistical analysis capabilities for predictive analytics. Designed for students and practitioners who want to perform the same analyses in Python that they would do in JMP.
 
@@ -854,6 +854,41 @@ print(f"Mean AUC (full):   {result['auc_full'].mean():.3f}")
 - ROC curves with AUC and cost-optimal operating point
 - Per-split AUC and cost arrays for further analysis
 
+#### Confusion Matrix at Custom Cutoff
+
+Re-classify logistic regression predictions at any probability threshold and get JMP-style Predicted Count / Predicted Rate tables:
+
+```python
+result = jmp.logistic_regression(df['Voluntary'], df[['Compa Ratio']], plot=False)
+
+# Default 50% cutoff
+stats_50 = jmp.confusion_matrix_at_cutoff(result, cutoff=0.50)
+
+# Custom 1.5% cutoff
+stats_015 = jmp.confusion_matrix_at_cutoff(result, cutoff=0.015)
+print(f"FPR: {stats_015['false_positive_rate']:.4f}")
+print(f"FNR: {stats_015['false_negative_rate']:.4f}")
+print(f"Misclassification: {stats_015['misclassification_rate']:.4f}")
+```
+
+#### Binary Smooth — Logistic Model Adequacy Check
+
+Nonparametric LOWESS smooth of a binary 0/1 variable against a continuous predictor, matching JMP's Bivariate platform Kernel Smoother (Cleveland 1979):
+
+```python
+# LOWESS smooth (default)
+jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'])
+
+# Zoom into low-probability region
+jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'],
+                       ylim=(0, 0.05),
+                       xlabel='Compa Ratio', ylabel='P(Vol Quit)')
+
+# Use smoothing spline instead (JMP's Fit Spline)
+jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'],
+                       smoother='spline', spline_df=5)
+```
+
 ---
 
 ## Function Reference
@@ -1019,6 +1054,8 @@ print(f"Mean AUC (full):   {result['auc_full'].mean():.3f}")
 | `rmse_from_model()` | Extract RMSE from a fitted statsmodels OLS model |
 | `tukey_lsmeans()` | Regression-adjusted LS means with CLD and publication figure |
 | `compare_classifiers()` | Repeated train/test cost-based comparison of two logistic classifiers |
+| `confusion_matrix_at_cutoff()` | JMP-style confusion matrix at any probability cutoff (FPR, FNR) |
+| `plot_binary_smooth()` | Nonparametric smooth (LOWESS/spline) of binary Y vs continuous X |
 
 ---
 
@@ -1186,6 +1223,7 @@ Contributions welcome! Please submit issues and pull requests on GitHub.
 
 ## Version History
 
+- **v2.8.0** - Added `confusion_matrix_at_cutoff()` for JMP-style confusion matrix at any probability threshold (Predicted Count/Rate tables, FPR, FNR), and `plot_binary_smooth()` for nonparametric LOWESS/spline smooth of binary Y vs continuous X (matches JMP's Bivariate Kernel Smoother)
 - **v2.7.0** - Added STAT 7230 utilities: `ci_mean()`, `lr_test()`, `abline()`, `qq_plot()`, `rmse_from_model()`, `tukey_lsmeans()` (LS means with CLD), `compare_classifiers()` (cost-based logistic model comparison with ROC)
 - **v2.5.1** - Fixed RMSE calculation in `linear_regression()` and `linear_regression_formula()` to use `sqrt(MSE)` = `sqrt(SSE/(n-p))` matching JMP's definition (was previously computing `sqrt(SSE/n)`)
 - **v2.5.0** - Added K Nearest Neighbors (`k_nearest_neighbors()`, `knn_classification()`, `knn_regression()`), Bootstrap Methods (`bootstrap()`, `bootstrap_rmse()`), and Logistic Regression (`logistic_regression()`, `plot_logistic_roc()`, `roc_curve()`, `confusion_matrix_stats()`)
