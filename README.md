@@ -1,7 +1,7 @@
 # JMP-Stats: JMP-Style Statistical Analysis for Python
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Version 2.8.0](https://img.shields.io/badge/version-2.8.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
+[![Version 2.9.0](https://img.shields.io/badge/version-2.9.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
 
 A comprehensive Python library that replicates JMP's statistical analysis capabilities for predictive analytics. Designed for students and practitioners who want to perform the same analyses in Python that they would do in JMP.
 
@@ -28,6 +28,7 @@ A comprehensive Python library that replicates JMP's statistical analysis capabi
   - [Bootstrap Methods](#bootstrap-methods)
   - [K Nearest Neighbors](#k-nearest-neighbors)
   - [STAT 7230: Advanced Regression & Classification](#stat-7230-advanced-regression--classification)
+  - [EDA & Model Evaluation Utilities](#eda--model-evaluation-utilities)
 - [Function Reference](#function-reference)
 - [Examples](#examples)
 - [Tips & Best Practices](#tips--best-practices)
@@ -891,6 +892,58 @@ jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'],
 
 ---
 
+### EDA & Model Evaluation Utilities
+
+New in **v2.9.0**: General-purpose EDA helpers and logistic regression evaluation utilities.
+
+#### Missing Values Summary
+
+```python
+# Missing values report with horizontal bar chart (JMP's Cols > Missing Data Pattern)
+miss = jmp.missing_summary(df)
+print(miss)
+
+# Without plot
+miss = jmp.missing_summary(df, plot=False)
+```
+
+#### Lift at Arbitrary Percentile
+
+```python
+# Fit a logistic regression first
+result = jmp.logistic_regression(df['Voluntary'], df[['Compa Ratio']])
+
+# Lift at top 2% (generalises decile-based lift)
+info = jmp.lift_at_percentile(result, percentile=2)
+print(f"Lift = {info['lift']:.2f}")
+
+# Lift at top 5%
+info5 = jmp.lift_at_percentile(result, percentile=5)
+```
+
+#### Predict Probability at a Single Point
+
+```python
+# Predicted probability for a single observation
+p = jmp.predict_logistic_at(result, Compa_Ratio=0.5)
+
+# Multiple predictors (underscores become spaces automatically)
+p = jmp.predict_logistic_at(result, Compa_Ratio=0.5, Age=35)
+```
+
+#### Event Rate by Group
+
+```python
+# Event rate of binary outcome across categorical groups
+rates = jmp.event_rate_by_group(df, 'BinaryVolQuit', 'Gender')
+
+# Customise: minimum group size, figure size, title
+rates = jmp.event_rate_by_group(df, 'BinaryVolQuit', 'Business Area',
+                                min_n=100, title='Quit Rate by Business Area')
+```
+
+---
+
 ## Function Reference
 
 ### Data Import & Utilities
@@ -1056,6 +1109,15 @@ jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'],
 | `compare_classifiers()` | Repeated train/test cost-based comparison of two logistic classifiers |
 | `confusion_matrix_at_cutoff()` | JMP-style confusion matrix at any probability cutoff (FPR, FNR) |
 | `plot_binary_smooth()` | Nonparametric smooth (LOWESS/spline) of binary Y vs continuous X |
+
+### EDA & Model Evaluation (v2.9.0)
+
+| Function | Description |
+|----------|-------------|
+| `missing_summary()` | Missing-values report with horizontal bar chart (JMP's Cols > Missing Data Pattern) |
+| `lift_at_percentile()` | Lift at any percentile of predicted probabilities (top 2 %, 5 %, etc.) |
+| `predict_logistic_at()` | Predicted probability at a single observation via keyword arguments |
+| `event_rate_by_group()` | Event rate of binary outcome across categorical levels with colour-coded chart |
 
 ---
 
@@ -1223,6 +1285,7 @@ Contributions welcome! Please submit issues and pull requests on GitHub.
 
 ## Version History
 
+- **v2.9.0** - Added EDA & model evaluation utilities: `missing_summary()` for missing-values report (JMP's Cols > Missing Data Pattern), `lift_at_percentile()` for lift at any percentile, `predict_logistic_at()` for single-observation predictions, `event_rate_by_group()` for binary event rates across categorical groups (JMP's Fit Y by X)
 - **v2.8.0** - Added `confusion_matrix_at_cutoff()` for JMP-style confusion matrix at any probability threshold (Predicted Count/Rate tables, FPR, FNR), and `plot_binary_smooth()` for nonparametric LOWESS/spline smooth of binary Y vs continuous X (matches JMP's Bivariate Kernel Smoother)
 - **v2.7.0** - Added STAT 7230 utilities: `ci_mean()`, `lr_test()`, `abline()`, `qq_plot()`, `rmse_from_model()`, `tukey_lsmeans()` (LS means with CLD), `compare_classifiers()` (cost-based logistic model comparison with ROC)
 - **v2.5.1** - Fixed RMSE calculation in `linear_regression()` and `linear_regression_formula()` to use `sqrt(MSE)` = `sqrt(SSE/(n-p))` matching JMP's definition (was previously computing `sqrt(SSE/n)`)

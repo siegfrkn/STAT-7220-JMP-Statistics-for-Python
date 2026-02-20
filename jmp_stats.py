@@ -9,6 +9,16 @@ matplotlib/seaborn for visualization.
 Installation Requirements:
     pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn patsy
 
+NEW IN v2.9.0:
+    - missing_summary(): Missing-values report with horizontal bar chart
+      (JMP's Cols > Missing Data Pattern)
+    - lift_at_percentile(): Lift at any percentile of predicted probabilities
+      (e.g. top 2%, top 5%) — generalises decile-based lift
+    - predict_logistic_at(): Predicted probability for a single observation
+      given predictor values as keyword arguments
+    - event_rate_by_group(): Event rate of binary outcome across levels of
+      a categorical variable with colour-coded bar chart (JMP's Fit Y by X)
+
 NEW IN v2.8.0:
     - confusion_matrix_at_cutoff(): JMP-style confusion matrix at any probability
       cutoff with Predicted Count, Predicted Rate, FPR, FNR
@@ -11281,10 +11291,291 @@ def compare_classifiers(df, formula_simple, formula_full,
 
 
 # =============================================================================
+# EDA & MODEL EVALUATION UTILITIES (v2.9.0)
+# =============================================================================
+
+
+def missing_summary(
+    df: pd.DataFrame,
+    plot: bool = True,
+    figsize: Tuple[int, int] = None,
+    color: str = 'salmon'
+) -> pd.DataFrame:
+    """
+    Missing-values report with optional horizontal bar chart.
+
+    Computes missing count and percentage for every column that has at least
+    one missing value, sorted by percentage descending.  This mirrors JMP's
+    **Cols > Missing Data Pattern** diagnostic.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input data.
+    plot : bool, default True
+        Whether to display a horizontal bar chart.
+    figsize : tuple, optional
+        Figure size.  Auto-scaled to the number of columns with missingness.
+    color : str, default 'salmon'
+        Bar colour.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``Count`` and ``% Missing``, indexed by column name,
+        sorted by ``% Missing`` descending.  Empty DataFrame if no
+        missingness.
+
+    Examples
+    --------
+    >>> miss = jmp.missing_summary(df)
+    >>> miss.head()
+    """
+    n = len(df)
+    missing = df.isnull().sum()
+    missing_pct = (missing / n * 100).round(1)
+    result = pd.DataFrame({'Count': missing, '% Missing': missing_pct})
+    result = result[result['Count'] > 0].sort_values('% Missing', ascending=False)
+
+    if result.empty:
+        if plot:
+            print('No missing values found.')
+        return result
+
+    if plot:
+        if figsize is None:
+            figsize = (10, max(4, len(result) * 0.35))
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.barh(result.index, result['% Missing'], color=color)
+        ax.set_xlabel('% Missing')
+        ax.set_title('Missing Values by Column')
+        for i, (idx, row) in enumerate(result.iterrows()):
+            ax.text(
+                row['% Missing'] + 0.3, i,
+                f"{row['Count']:,.0f} ({row['% Missing']}%)",
+                va='center', fontsize=9,
+            )
+        plt.tight_layout()
+        plt.show()
+
+    return result
+
+
+def lift_at_percentile(
+    result,  # LogisticRegressionResults
+    percentile: float = 2.0,
+    verbose: bool = True
+) -> Dict[str, float]:
+    """
+    Compute lift at an arbitrary percentile of predicted probabilities.
+
+    Lift is the ratio of the observed event rate *within the top-k%
+    of predicted probabilities* to the overall event rate (computed
+    only over non-missing rows).  JMP reports lift for each decile
+    by default, but homework problems often ask for lift at the top
+    2 %, 5 %, etc.
+
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Fitted logistic regression result from ``logistic_regression()``.
+    percentile : float, default 2.0
+        Top percentile to evaluate (e.g. ``2.0`` = top 2 %).
+    verbose : bool, default True
+        Print a formatted summary.
+
+    Returns
+    -------
+    dict
+        Keys: ``percentile``, ``n_top``, ``n_total``, ``events_in_top``,
+        ``event_rate_in_top``, ``overall_event_rate``, ``lift``.
+
+    Examples
+    --------
+    >>> info = jmp.lift_at_percentile(result, percentile=2)
+    >>> print(f"Lift at top 2%: {info['lift']:.2f}")
+    """
+    y = result.y_binary.values.astype(float)
+    probs = result.predicted_probs[f'Prob[{result.target_level}]'].values
+
+    # Remove NaN pairs (mirrors JMP's "use only non-missing rows")
+    mask = ~(np.isnan(y) | np.isnan(probs))
+    y = y[mask]
+    probs = probs[mask]
+
+    n_total = len(y)
+    overall_rate = y.mean()
+
+    # Top percentile: highest predicted probs
+    cutoff_value = np.percentile(probs, 100 - percentile)
+    top_mask = probs >= cutoff_value
+    n_top = int(top_mask.sum())
+    events_in_top = int(y[top_mask].sum())
+    rate_in_top = events_in_top / n_top if n_top > 0 else 0.0
+    lift = rate_in_top / overall_rate if overall_rate > 0 else float('inf')
+
+    info = {
+        'percentile': percentile,
+        'n_top': n_top,
+        'n_total': n_total,
+        'events_in_top': events_in_top,
+        'event_rate_in_top': rate_in_top,
+        'overall_event_rate': overall_rate,
+        'lift': lift,
+    }
+
+    if verbose:
+        print(f"Lift at Top {percentile}%")
+        print("-" * 40)
+        print(f"  Observations in top {percentile}%: {n_top:,}")
+        print(f"  Events in top {percentile}%:       {events_in_top:,}")
+        print(f"  Event rate (top {percentile}%):     {rate_in_top:.4f} ({rate_in_top*100:.2f}%)")
+        print(f"  Overall event rate:          {overall_rate:.4f} ({overall_rate*100:.2f}%)")
+        print(f"  Lift:                        {lift:.4f}")
+
+    return info
+
+
+def predict_logistic_at(
+    result,  # LogisticRegressionResults
+    verbose: bool = True,
+    **kwargs
+) -> float:
+    """
+    Predicted probability for a single observation given predictor values.
+
+    This is a convenience wrapper around the result's ``predict_proba()``
+    method.  Instead of manually constructing a one-row DataFrame you can
+    simply pass keyword arguments:
+
+        ``predict_logistic_at(result, Compa_Ratio=0.5)``
+
+    Feature names with spaces should be passed using underscores; they
+    are translated automatically (e.g. ``Compa_Ratio`` → ``Compa Ratio``).
+
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Fitted logistic regression result from ``logistic_regression()``.
+    verbose : bool, default True
+        Print the predicted probability.
+    **kwargs
+        Predictor name=value pairs.
+
+    Returns
+    -------
+    float
+        P(target level) for the given predictor values.
+
+    Examples
+    --------
+    >>> p = jmp.predict_logistic_at(result, Compa_Ratio=0.5)
+    """
+    # Build single-row DataFrame, translating underscores to spaces where
+    # the space-version is the actual feature name
+    row = {}
+    for key, val in kwargs.items():
+        if key in result.feature_names:
+            row[key] = [val]
+        else:
+            spaced = key.replace('_', ' ')
+            if spaced in result.feature_names:
+                row[spaced] = [val]
+            else:
+                raise ValueError(
+                    f"'{key}' (and '{spaced}') not found in model features: "
+                    f"{result.feature_names}"
+                )
+
+    # Fill any missing features with 0 (for intercept-included models the
+    # caller should supply all predictors, but we guard against error)
+    for fname in result.feature_names:
+        if fname not in row:
+            raise ValueError(
+                f"Missing predictor '{fname}'.  Supply all model features: "
+                f"{result.feature_names}"
+            )
+
+    X_single = pd.DataFrame(row)
+    prob = result.predict_proba(X_single)[f'Prob[{result.target_level}]'].iloc[0]
+
+    if verbose:
+        feat_str = ', '.join(f'{k}={v}' for k, v in kwargs.items())
+        print(f"P({result.target_level} | {feat_str}) = {prob:.6f}")
+
+    return prob
+
+
+def event_rate_by_group(
+    df: pd.DataFrame,
+    outcome_col: str,
+    group_col: str,
+    min_n: int = 50,
+    plot: bool = True,
+    figsize: Tuple[int, int] = None,
+    title: str = None
+) -> pd.DataFrame:
+    """
+    Event rate of a binary outcome across levels of a categorical variable.
+
+    Mimics JMP's **Fit Y by X** when X is nominal and Y is binary: displays
+    a colour-coded horizontal bar chart where red ≈ high event rate and
+    green ≈ low event rate.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input data.
+    outcome_col : str
+        Name of a 0/1 binary column.
+    group_col : str
+        Name of a categorical grouping column.
+    min_n : int, default 50
+        Exclude groups with fewer observations than this.
+    plot : bool, default True
+        Whether to display the bar chart.
+    figsize : tuple, optional
+        Figure size.  Auto-scaled to the number of groups.
+    title : str, optional
+        Plot title.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``mean`` (event rate), ``count`` (group size), and
+        ``events`` (number of events), indexed by group level, sorted
+        ascending by event rate.
+
+    Examples
+    --------
+    >>> rates = jmp.event_rate_by_group(df, 'BinaryVolQuit', 'Gender')
+    """
+    agg = df.groupby(group_col)[outcome_col].agg(['mean', 'count', 'sum'])
+    agg.columns = ['mean', 'count', 'events']
+    agg['events'] = agg['events'].astype(int)
+    agg = agg[agg['count'] >= min_n].sort_values('mean', ascending=True)
+
+    if plot and not agg.empty:
+        if figsize is None:
+            figsize = (8, max(3, len(agg) * 0.45))
+        fig, ax = plt.subplots(figsize=figsize)
+        colors = plt.cm.RdYlGn_r(agg['mean'] / agg['mean'].max())
+        ax.barh(agg.index.astype(str), agg['mean'] * 100, color=colors,
+                edgecolor='white')
+        ax.set_xlabel('Event Rate (%)')
+        ax.set_title(title or f'Event Rate by {group_col}')
+        ax.tick_params(labelsize=9)
+        plt.tight_layout()
+        plt.show()
+
+    return agg
+
+
+# =============================================================================
 # MODULE EXPORTS
 # =============================================================================
 
-__version__ = "2.8.0"
+__version__ = "2.9.0"
 __all__ = [
     # Data classes
     'DescriptiveStats', 'NormalityTest', 'RegressionResults', 'ResidualDiagnostics',
@@ -11368,6 +11659,10 @@ __all__ = [
 
     # NEW v2.8.0: Custom Cutoff & Binary Smooth
     'confusion_matrix_at_cutoff', 'plot_binary_smooth',
+
+    # NEW v2.9.0: EDA & Model Evaluation Utilities
+    'missing_summary', 'lift_at_percentile', 'predict_logistic_at',
+    'event_rate_by_group',
 
     # Utilities
     'detect_outliers', 'recode', 'log_transform',
