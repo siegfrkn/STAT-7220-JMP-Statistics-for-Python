@@ -7,7 +7,19 @@ using single function calls. Leverages scipy, statsmodels, pandas, numpy, and
 matplotlib/seaborn for visualization.
 
 Installation Requirements:
-    pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn
+    pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn patsy
+
+NEW IN v2.7.0:
+    - STAT 7230: ADVANCED REGRESSION & CLASSIFICATION UTILITIES:
+        - ci_mean(): Confidence interval for a sample mean (normal approximation)
+        - lr_test(): Likelihood ratio test for nested logistic models
+        - abline(): Add a slope/intercept reference line to a matplotlib Axes
+        - qq_plot(): QQ plot with KS simultaneous confidence bounds
+        - rmse_from_model(): Extract RMSE from a fitted statsmodels OLS model
+        - tukey_lsmeans(): Regression-adjusted LS means with Compact Letter Display,
+          pairwise comparisons, and publication figure
+        - compare_classifiers(): Repeated train/test cost-based comparison of two
+          logistic classifiers with cost curves and ROC curves
 
 NEW IN v2.6.0:
     - DECISION TREES / PARTITION (JMP's Analyze > Predictive Modeling > Partition):
@@ -268,13 +280,18 @@ except ImportError:
 try:
     import statsmodels.api as sm
     from statsmodels.formula.api import ols
+    import statsmodels.formula.api as smf
     from statsmodels.stats.outliers_influence import variance_inflation_factor
     from statsmodels.stats.diagnostic import het_breuschpagan, het_white
     from statsmodels.stats.stattools import durbin_watson
     from statsmodels.stats.multicomp import pairwise_tukeyhsd
+    from statsmodels.stats.multitest import multipletests
+    import patsy
     HAS_STATSMODELS = True
 except ImportError:
     HAS_STATSMODELS = False
+
+import itertools
 
 # sklearn imports for KNN and Decision Trees
 try:
@@ -282,9 +299,31 @@ try:
     from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import train_test_split as sklearn_train_test_split
     from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor, export_text
+    from sklearn.metrics import roc_curve as sklearn_roc_curve, roc_auc_score
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
+
+
+# =============================================================================
+# INTERNAL UTILITIES
+# =============================================================================
+
+
+def _to_clean_array(data):
+    """Convert any array-like to a flat numpy array with NaNs removed."""
+    arr = np.asarray(data).ravel()
+    return arr[~np.isnan(arr)]
+
+
+def _to_2d_array(X):
+    """Convert Series / DataFrame / array to a 2-D numpy array."""
+    if isinstance(X, pd.Series):
+        return X.values.reshape(-1, 1)
+    elif isinstance(X, pd.DataFrame):
+        return X.values
+    X = np.asarray(X)
+    return X.reshape(-1, 1) if X.ndim == 1 else X
 
 
 # =============================================================================
@@ -777,8 +816,7 @@ def test_normality(data: Union[pd.Series, np.ndarray, List], alpha: float = 0.05
     NormalityTest
         Object containing test statistics and conclusions
     """
-    arr = np.asarray(data)
-    arr = arr[~np.isnan(arr)]
+    arr = _to_clean_array(data)
     
     if len(arr) <= 5000:
         shap_stat, shap_p = shapiro(arr)
@@ -920,7 +958,7 @@ def linear_regression(y: Union[pd.Series, np.ndarray],
     predictions = model.predict(X_with_const)
     residuals = y - predictions
 
-    rmse = float(np.sqrt(model.mse_resid))  # JMP RMSE = sqrt(MSE) = sqrt(SSE/(n-p))
+    rmse = rmse_from_model(model, verbose=False)
     mae = float(np.mean(np.abs(residuals)))
     mape = float(np.mean(np.abs(residuals / y)) * 100) if np.all(y != 0) else np.nan
 
@@ -1057,7 +1095,7 @@ def linear_regression_formula(formula: str,
     predictions = model.predict(data)
     residuals = model.resid
 
-    rmse = float(np.sqrt(model.mse_resid))  # JMP RMSE = sqrt(MSE) = sqrt(SSE/(n-p))
+    rmse = rmse_from_model(model, verbose=False)
     mae = float(np.mean(np.abs(residuals)))
     y_values = model.model.endog
     mape = float(np.mean(np.abs(residuals / y_values)) * 100) if np.all(y_values != 0) else np.nan
@@ -1132,14 +1170,7 @@ def residual_diagnostics(y: Union[pd.Series, np.ndarray],
     
     y = np.asarray(y).flatten()
     
-    if isinstance(X, pd.Series):
-        X = X.values.reshape(-1, 1)
-    elif isinstance(X, pd.DataFrame):
-        X = X.values
-    else:
-        X = np.asarray(X)
-        if X.ndim == 1:
-            X = X.reshape(-1, 1)
+    X = _to_2d_array(X)
     
     mask = ~(np.isnan(y) | np.any(np.isnan(X), axis=1))
     y = y[mask]
@@ -1438,8 +1469,7 @@ def oneway_anova(data: pd.DataFrame, response: str, factor: str,
 
 def ttest_1sample(data: Union[pd.Series, np.ndarray], popmean: float, alpha: float = 0.05) -> TTestResults:
     """One-sample t-test."""
-    arr = np.asarray(data)
-    arr = arr[~np.isnan(arr)]
+    arr = _to_clean_array(data)
     
     t_stat, p_two = stats.ttest_1samp(arr, popmean)
     
@@ -1714,8 +1744,7 @@ def plot_distribution(data: Union[pd.Series, np.ndarray], title: str = "Distribu
         print("matplotlib required for plotting")
         return None
     
-    arr = np.asarray(data)
-    arr = arr[~np.isnan(arr)]
+    arr = _to_clean_array(data)
     
     fig, axes = plt.subplots(2, 2, figsize=figsize)
     
@@ -1736,7 +1765,7 @@ def plot_distribution(data: Union[pd.Series, np.ndarray], title: str = "Distribu
     ax2.set_title(f'{title} - Box Plot')
     
     ax3 = axes[1, 0]
-    stats.probplot(arr, dist="norm", plot=ax3)
+    qq_plot(arr, ax3, dist="norm", alpha=0.05)
     ax3.set_title(f'{title} - Normal Q-Q Plot')
     
     ax4 = axes[1, 1]
@@ -1775,14 +1804,7 @@ def plot_regression_diagnostics(y: Union[pd.Series, np.ndarray],
     
     y = np.asarray(y).flatten()
     
-    if isinstance(X, pd.Series):
-        X = X.values.reshape(-1, 1)
-    elif isinstance(X, pd.DataFrame):
-        X = X.values
-    else:
-        X = np.asarray(X)
-        if X.ndim == 1:
-            X = X.reshape(-1, 1)
+    X = _to_2d_array(X)
     
     mask = ~(np.isnan(y) | np.any(np.isnan(X), axis=1))
     y = y[mask]
@@ -1797,9 +1819,7 @@ def plot_regression_diagnostics(y: Union[pd.Series, np.ndarray],
     
     ax1 = axes[0, 0]
     ax1.scatter(predicted, y, alpha=0.5, edgecolors='black', linewidth=0.5)
-    min_val = min(predicted.min(), y.min())
-    max_val = max(predicted.max(), y.max())
-    ax1.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='Perfect fit')
+    abline(ax1, 0, 1, 'r--', lw=2, label='Perfect fit')
     ax1.set_xlabel('Predicted')
     ax1.set_ylabel('Actual')
     ax1.set_title('Actual by Predicted Plot')
@@ -1820,7 +1840,7 @@ def plot_regression_diagnostics(y: Union[pd.Series, np.ndarray],
     ax3.set_title('Residual by Row Plot')
     
     ax4 = axes[1, 1]
-    stats.probplot(residuals, dist="norm", plot=ax4)
+    qq_plot(residuals, ax4, dist="norm", alpha=0.05)
     ax4.set_title('Residual Normal Quantile Plot')
     
     plt.tight_layout()
@@ -1907,8 +1927,7 @@ def plot_control_chart(data: Union[pd.Series, np.ndarray], chart_type: str = 'in
     if not HAS_MATPLOTLIB:
         return None
     
-    arr = np.asarray(data)
-    arr = arr[~np.isnan(arr)]
+    arr = _to_clean_array(data)
     
     fig, ax = plt.subplots(figsize=figsize)
     
@@ -2048,8 +2067,7 @@ def multivariate_analysis(data: pd.DataFrame, variables: Optional[List[str]] = N
 def detect_outliers(data: Union[pd.Series, np.ndarray], method: str = 'iqr',
                     threshold: float = 1.5) -> Dict[str, Any]:
     """Detect outliers using IQR or Z-score method."""
-    arr = np.asarray(data)
-    arr = arr[~np.isnan(arr)]
+    arr = _to_clean_array(data)
     
     if method == 'iqr':
         q1 = np.percentile(arr, 25)
@@ -2840,14 +2858,7 @@ def hat_matrix(y: Union[pd.Series, np.ndarray],
     
     y = np.asarray(y).flatten()
     
-    if isinstance(X, pd.Series):
-        X = X.values.reshape(-1, 1)
-    elif isinstance(X, pd.DataFrame):
-        X = X.values
-    else:
-        X = np.asarray(X)
-        if X.ndim == 1:
-            X = X.reshape(-1, 1)
+    X = _to_2d_array(X)
     
     # Remove NaN
     mask = ~(np.isnan(y) | np.any(np.isnan(X), axis=1))
@@ -3055,7 +3066,7 @@ def subset_regression(y: Union[pd.Series, np.ndarray],
                 mallows_cp = sse / mse_full - n + 2 * p
                 
                 # RMSE
-                rmse = np.sqrt(model.mse_resid)
+                rmse = rmse_from_model(model, verbose=False)
                 
                 # Cross-validation (optional, slower)
                 cv_rmse = np.nan
@@ -3356,7 +3367,7 @@ def stepwise_regression_enhanced(
             'adj_rsq': model.rsquared_adj,
             'aic': model.aic,
             'bic': model.bic,
-            'rmse': np.sqrt(model.mse_resid),
+            'rmse': rmse_from_model(model, verbose=False),
             'cp': mallows_cp,
             'pvalues': dict(zip(['Intercept'] + features, model.pvalues))
         }
@@ -4646,20 +4657,16 @@ def plot_train_test_comparison(
         # Train: Actual vs Predicted
         ax = axes[0, 0]
         ax.scatter(r.train_actual, r.train_predicted, alpha=0.6, label='Training')
-        min_val = min(r.train_actual.min(), r.train_predicted.min())
-        max_val = max(r.train_actual.max(), r.train_predicted.max())
-        ax.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect fit')
+        abline(ax, 0, 1, 'r--', label='Perfect fit')
         ax.set_xlabel('Actual')
         ax.set_ylabel('Predicted')
         ax.set_title(f'Training: Actual vs Predicted (R²={r.train_r_squared:.4f})')
         ax.legend()
-        
+
         # Test: Actual vs Predicted
         ax = axes[0, 1]
         ax.scatter(r.test_actual, r.test_predicted, alpha=0.6, color='orange', label='Test')
-        min_val = min(r.test_actual.min(), r.test_predicted.min())
-        max_val = max(r.test_actual.max(), r.test_predicted.max())
-        ax.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect fit')
+        abline(ax, 0, 1, 'r--', label='Perfect fit')
         ax.set_xlabel('Actual')
         ax.set_ylabel('Predicted')
         ax.set_title(f'Test: Actual vs Predicted (R²={r.test_r_squared:.4f})')
@@ -8989,7 +8996,7 @@ def bootstrap_rmse(
     # Calculate observed RMSE
     X_design = sm.add_constant(X_clean)
     model = sm.OLS(y_clean, X_design).fit()
-    observed_rmse = np.sqrt(model.mse_resid)
+    observed_rmse = rmse_from_model(model, verbose=False)
     
     # Bootstrap resampling
     boot_rmse = np.zeros(n_bootstrap)
@@ -9004,7 +9011,7 @@ def bootstrap_rmse(
         X_boot_design = sm.add_constant(X_boot)
         try:
             boot_model = sm.OLS(y_boot, X_boot_design).fit()
-            boot_rmse[i] = np.sqrt(boot_model.mse_resid)
+            boot_rmse[i] = rmse_from_model(boot_model, verbose=False)
         except:
             boot_rmse[i] = np.nan
     
@@ -10526,10 +10533,519 @@ def save_decision_tree_predictions(
 
 
 # =============================================================================
+# STAT 7230: ADVANCED REGRESSION & CLASSIFICATION UTILITIES
+# =============================================================================
+
+
+def ci_mean(data, level=0.95, decimals=2, verbose=True):
+    """
+    Confidence interval for a sample mean using the t-distribution.
+
+    Uses the t-distribution with n-1 degrees of freedom (matching JMP's
+    default when sigma is unknown).
+
+    Parameters
+    ----------
+    data : array-like
+        Sample data.
+    level : float, optional
+        Confidence level (default 0.95).
+    decimals : int, optional
+        Number of decimal places for printing (default 2).
+    verbose : bool, optional
+        If True, print the result (default True).
+
+    Returns
+    -------
+    tuple
+        (mean, standard_error, ci_lower, ci_upper)
+    """
+    data = np.asarray(data).ravel()
+    data = data[~np.isnan(data)]
+    n = len(data)
+    avg = np.mean(data)
+    se = stats.sem(data)
+    ci_low, ci_high = stats.t.interval(level, df=n - 1, loc=avg, scale=se)
+    if verbose:
+        print(f"Sample Mean: {avg:.2f}")
+        print(f"{level*100}% Confidence Interval: ({ci_low:.{decimals}f}, {ci_high:.{decimals}f})")
+    return avg, se, ci_low, ci_high
+
+
+def lr_test(base, expanded, verbose=True):
+    """
+    Likelihood ratio test for nested logistic regression models.
+
+    Parameters
+    ----------
+    base : statsmodels result
+        The restricted (smaller) fitted logistic model.
+    expanded : statsmodels result
+        The unrestricted (larger) fitted logistic model.
+    verbose : bool, optional
+        If True, print the test result (default True).
+
+    Returns
+    -------
+    dict
+        {'lr': test statistic, 'df': degrees of freedom, 'p': p-value}
+    """
+    lr_stat = 2 * (expanded.llf - base.llf)
+    df_diff = int(expanded.df_model - base.df_model)
+    p_value = stats.chi2.sf(lr_stat, df_diff)
+    if verbose:
+        print(f"LR = {lr_stat:.3f}, df = {df_diff}, p = {p_value:.3g}")
+    return {"lr": lr_stat, "df": df_diff, "p": p_value}
+
+
+def abline(ax, b, m, *args, **kwargs):
+    """
+    Add a line with slope *m* and intercept *b* to a matplotlib Axes.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        The axes to draw on.
+    b : float
+        y-intercept.
+    m : float
+        Slope.
+    *args, **kwargs
+        Passed through to ``ax.plot()``.
+    """
+    xlim = ax.get_xlim()
+    ylim = [m * xlim[0] + b, m * xlim[1] + b]
+    ax.plot(xlim, ylim, *args, **kwargs)
+
+
+def _lilliefors_critical_value(n, alpha):
+    """
+    Approximate Lilliefors critical value for the normality test.
+
+    Uses the asymptotic ``c / sqrt(n)`` approximation from standard
+    Lilliefors tables (Conover 1980, Table A15).  For alpha values not
+    in the table, linear interpolation on the ``c`` coefficients is used.
+    """
+    # Lilliefors c-coefficients: d_crit ≈ c / sqrt(n)
+    _table = {0.01: 1.031, 0.05: 0.886, 0.10: 0.805, 0.15: 0.768, 0.20: 0.736}
+    if alpha in _table:
+        return _table[alpha] / np.sqrt(n)
+    alphas = sorted(_table.keys())
+    coeffs = [_table[a] for a in alphas]
+    c = float(np.interp(alpha, alphas, coeffs))
+    return c / np.sqrt(n)
+
+
+def qq_plot(data, ax, dist="norm", alpha=0.05):
+    """
+    QQ plot with Lilliefors simultaneous confidence bounds.
+
+    Matches JMP's Normal Quantile Plot, which uses Lilliefors bounds
+    (Conover 1980) rather than standard Kolmogorov-Smirnov bounds.
+    Lilliefors bounds are tighter because they account for the fact that
+    the mean and standard deviation are estimated from the data.
+
+    Parameters
+    ----------
+    data : array-like
+        Sample data (NaNs are dropped automatically).
+    ax : matplotlib.axes.Axes
+        The axes to draw on.
+    dist : str, optional
+        Distribution family (default ``'norm'``).
+    alpha : float, optional
+        Significance level for confidence bounds (default 0.05).
+    """
+    data = np.asarray(data)
+    data = data[~np.isnan(data)]
+    sorted_data = np.sort(data)
+    n = len(sorted_data)
+    probs = (np.arange(1, n + 1) - 0.5) / n
+    mu = np.mean(data)
+    sigma = np.std(data, ddof=1)
+    theoretical_q = stats.norm.ppf(probs, loc=mu, scale=sigma)
+    # Lilliefors-based simultaneous bounds (matches JMP)
+    d_crit = _lilliefors_critical_value(n, alpha)
+    lower_bound = stats.norm.ppf(np.clip(probs - d_crit, 1e-10, 1 - 1e-10),
+                                 loc=mu, scale=sigma)
+    upper_bound = stats.norm.ppf(np.clip(probs + d_crit, 1e-10, 1 - 1e-10),
+                                 loc=mu, scale=sigma)
+    ax.plot(theoretical_q, sorted_data, 'o', label="Sample Data")
+    ax.plot(theoretical_q, theoretical_q, 'r--', label="45° Reference Line")
+    ax.fill_between(theoretical_q, lower_bound, upper_bound, color='lightgray', alpha=0.5,
+                     label=f"{int((1-alpha)*100)}% Simultaneous Bounds")
+    ax.set_xlabel("Theoretical Quantiles")
+    ax.set_ylabel("Sample Quantiles")
+    ax.set_title("QQ Plot")
+    ax.grid(False)
+
+
+def rmse_from_model(model, verbose=True, decimals=2):
+    """
+    Extract the RMSE from a fitted statsmodels OLS regression model.
+
+    The RMSE is computed as ``sqrt(model.scale)``, which equals
+    ``sqrt(SSE / df_resid)`` — the standard JMP definition.
+
+    Parameters
+    ----------
+    model : statsmodels RegressionResultsWrapper
+        A fitted OLS model (e.g. from ``smf.ols(...).fit()``).
+    verbose : bool, optional
+        If True, print the RMSE (default True).
+    decimals : int, optional
+        Decimal places for printing (default 2).
+
+    Returns
+    -------
+    float
+        Root Mean Square Error.
+    """
+    rmse_val = np.sqrt(model.scale)
+    if verbose:
+        print(f"RMSE = {rmse_val:.{decimals}f}")
+    return rmse_val
+
+
+def tukey_lsmeans(model, factor, alpha=0.05, figsize=(6, 4)):
+    """
+    Compute regression-adjusted LS means, CIs, and a Tukey HSD compact letter
+    display (CLD) for a categorical factor in a statsmodels formula-based
+    regression model, and produce a publication-style figure.
+
+    Uses the Tukey-Kramer HSD method (studentized range distribution) for
+    pairwise comparisons, matching JMP's "All Pairs, Tukey HSD" /
+    Connecting Letters Report.
+
+    Parameters
+    ----------
+    model : statsmodels RegressionResultsWrapper
+        Fitted model from statsmodels (e.g. OLS) using a Patsy formula.
+    factor : str
+        Name of the categorical variable as it appears in the original
+        DataFrame.  It must be used as ``C(factor)`` in the model formula.
+    alpha : float, optional
+        Significance level for CIs and multiple comparisons (default 0.05).
+    figsize : tuple, optional
+        Figure size for the plot.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Table with columns: [factor, 'LSMean', 'CI_Lower', 'CI_Upper', 'Group'].
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels and patsy are required for tukey_lsmeans")
+
+    # 0. Extract model & data pieces
+    if not hasattr(model.model, "data") or model.model.data.frame is None:
+        raise ValueError("Model does not appear to have its original DataFrame attached.")
+    df = model.model.data.frame.copy()
+    if factor not in df.columns:
+        raise ValueError(f"Factor '{factor}' not found in model data frame columns.")
+    # Ensure factor is categorical (fix for deprecated is_categorical_dtype)
+    if not isinstance(df[factor].dtype, pd.CategoricalDtype):
+        df[factor] = df[factor].astype("category")
+    levels = df[factor].cat.categories.tolist()
+    k = len(levels)
+    ref_level = levels[0]
+    factor_term = f"C({factor})"
+    param_name = lambda lvl: f"{factor_term}[T.{lvl}]"
+    formula = model.model.formula
+    cov = model.cov_params()
+    beta = model.params
+    df_resid = model.df_resid
+    mse = model.scale  # residual mean square error
+
+    # 1. LS means, SEs, and CIs for each level
+    ls_rows = []
+    xbar_dict = {}  # store x_bar vectors for SE of differences
+    for lvl in levels:
+        df_copy = df.copy()
+        df_copy[factor] = pd.Categorical([lvl] * len(df_copy), categories=levels)
+        y_tmp, X_tmp = patsy.dmatrices(formula, df_copy, return_type="dataframe")
+        X_tmp = X_tmp[beta.index]
+        x_bar = X_tmp.to_numpy().mean(axis=0)
+        xbar_dict[lvl] = x_bar
+        ls_mean = float(np.dot(x_bar, beta.to_numpy()))
+        var_mean = float(x_bar @ cov.to_numpy() @ x_bar)
+        se_mean = np.sqrt(var_mean)
+        tcrit = stats.t.ppf(1 - alpha / 2, df_resid)
+        ci_low = ls_mean - tcrit * se_mean
+        ci_high = ls_mean + tcrit * se_mean
+        ls_rows.append({factor: lvl, "LSMean": ls_mean, "SE": se_mean,
+                        "CI_Lower": ci_low, "CI_Upper": ci_high})
+    ls_df = pd.DataFrame(ls_rows)
+    lsmean_dict = dict(zip(ls_df[factor], ls_df["LSMean"]))
+
+    # 2. Tukey HSD pairwise comparisons using studentized range distribution
+    #    JMP's q* = q_alpha(k, df) / sqrt(2)
+    #    Two means differ if |mean_a - mean_b| > q* * SE_diff
+    q_crit = stats.studentized_range.ppf(1 - alpha, k, df_resid)
+    q_star = q_crit / np.sqrt(2)
+
+    sig_pairs = set()  # pairs that are significantly different
+    for a, b in itertools.combinations(levels, 2):
+        diff = abs(lsmean_dict[a] - lsmean_dict[b])
+        # SE of the difference between two LS means (Tukey-Kramer)
+        d_vec = xbar_dict[a] - xbar_dict[b]
+        se_diff = np.sqrt(float(d_vec @ cov.to_numpy() @ d_vec))
+        hsd = q_star * se_diff
+        if diff > hsd:
+            sig_pairs.add((a, b))
+
+    def is_sig(a, b):
+        return (a, b) in sig_pairs or (b, a) in sig_pairs
+
+    # 3. Compact Letter Display (CLD)
+    ls_df = ls_df.sort_values("LSMean", ascending=False).reset_index(drop=True)
+    sorted_levels = ls_df[factor].tolist()
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    group_letters = {lvl: "" for lvl in sorted_levels}
+    letter_groups = []
+    for lvl in sorted_levels:
+        assigned = False
+        for i, grp in enumerate(letter_groups):
+            if all(not is_sig(lvl, other) for other in grp):
+                grp.append(lvl)
+                group_letters[lvl] += letters[i]
+                assigned = True
+                break
+        if not assigned:
+            idx = len(letter_groups)
+            if idx >= len(letters):
+                raise ValueError("Ran out of letters for CLD!")
+            letter_groups.append([lvl])
+            group_letters[lvl] += letters[idx]
+    ls_df["Group"] = ls_df[factor].map(group_letters)
+
+    # 4. Publication-ready figure
+    fig, ax = plt.subplots(figsize=figsize)
+    x = np.arange(len(ls_df))
+    y = ls_df["LSMean"].values
+    yerr_lower = y - ls_df["CI_Lower"].values
+    yerr_upper = ls_df["CI_Upper"].values - y
+    yerr = np.vstack([yerr_lower, yerr_upper])
+    ax.errorbar(x, y, yerr=yerr, fmt="o", capsize=5, linewidth=1.2)
+    offset = (ls_df["CI_Upper"].max() - ls_df["CI_Lower"].min()) * 0.03
+    for xi, yi, ci_upper, grp in zip(x, y, ls_df["CI_Upper"], ls_df["Group"]):
+        ax.text(xi, ci_upper + offset, grp, ha="center", va="bottom", fontsize=10)
+    ax.set_xticks(x)
+    ax.set_xticklabels(ls_df[factor], rotation=0)
+    ax.set_ylabel("LS mean of response")
+    ax.set_xlabel(factor)
+    ax.set_title(f"Least-squares means by {factor}\nwith {int((1-alpha)*100)}% CIs and CLD groups")
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    fig.tight_layout()
+    plt.show()
+
+    # 5. Return table
+    cld_table = ls_df[[factor, "LSMean", "CI_Lower", "CI_Upper", "Group"]].copy()
+    return cld_table
+
+
+def compare_classifiers(df, formula_simple, formula_full,
+    *,
+    cost_TN, cost_FP, cost_FN, cost_TP,
+    test_size=0.30,
+    n_splits=30,
+    seed=1,
+    taus=None,
+    roc_fpr_grid=None,
+    disp=False,
+):
+    """
+    Repeated train/test split comparison of two logistic models using
+    cost curves and ROC curves.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Data containing response and predictor columns.
+    formula_simple : str
+        Patsy formula for the simpler model (e.g. ``'y ~ x1'``).
+    formula_full : str
+        Patsy formula for the fuller model (e.g. ``'y ~ x1 + x2 + x3'``).
+    cost_TN : float
+        Cost assigned to true negatives.
+    cost_FP : float
+        Cost assigned to false positives.
+    cost_FN : float
+        Cost assigned to false negatives.
+    cost_TP : float
+        Cost assigned to true positives.
+    test_size : float, optional
+        Fraction of data to hold out for testing (default 0.30).
+    n_splits : int, optional
+        Number of repeated train/test splits (default 30).
+    seed : int, optional
+        Base random seed (default 1).
+    taus : array-like or None, optional
+        Threshold grid for cost curves.
+    roc_fpr_grid : array-like or None, optional
+        FPR grid for interpolated ROC curves.
+    disp : bool, optional
+        If True, show statsmodels fitting output (default False).
+
+    Returns
+    -------
+    dict
+        Keys: ``tau_star``, ``auc_simple``, ``auc_full``,
+        ``cost_tau_star_simple``, ``cost_tau_star_full``.
+    """
+    if not HAS_STATSMODELS:
+        raise ImportError("statsmodels required for compare_classifiers")
+    if not HAS_SKLEARN:
+        raise ImportError("scikit-learn required for compare_classifiers (roc_curve, roc_auc_score)")
+
+    # Check response name
+    def _get_response_name(formula):
+        return formula.split('~')[0].strip()
+
+    response_name = _get_response_name(formula_simple)
+    if response_name != _get_response_name(formula_full):
+        print(f"Response name '{response_name}' does not match response in second formula.")
+        return None
+    if response_name not in df.columns:
+        print(f"Response name '{response_name}' not found in data frame.")
+        return None
+
+    # Defaults
+    if taus is None:
+        taus = np.linspace(0.01, 0.5, 200)
+    taus = np.asarray(taus)
+    if roc_fpr_grid is None:
+        roc_fpr_grid = np.linspace(0, 1, 401)
+    roc_fpr_grid = np.asarray(roc_fpr_grid)
+
+    # Cost-optimal threshold tau*
+    tau_star = (cost_FP - cost_TN) / (
+        (cost_FN - cost_TP) + (cost_FP - cost_TN)
+    )
+
+    def expected_cost(y_true, p_hat, tau):
+        treat = p_hat > tau
+        y_true = y_true.astype(int)
+        cost = np.zeros_like(y_true, dtype=float)
+        cost[(y_true == 0) & (~treat)] = cost_TN
+        cost[(y_true == 0) & (treat)]  = cost_FP
+        cost[(y_true == 1) & (~treat)] = cost_FN
+        cost[(y_true == 1) & (treat)]  = cost_TP
+        return cost.mean()
+
+    def interp_roc(y, p):
+        fpr, tpr, _ = sklearn_roc_curve(y, p)
+        return np.interp(roc_fpr_grid, fpr, tpr, left=0.0, right=1.0)
+
+    def roc_point_at_tau(y_true, p_hat, tau):
+        y_true = y_true.astype(int)
+        treat = p_hat > tau
+        TP = np.sum((y_true == 1) & (treat == 1))
+        FN = np.sum((y_true == 1) & (treat == 0))
+        FP = np.sum((y_true == 0) & (treat == 1))
+        TN = np.sum((y_true == 0) & (treat == 0))
+        tpr = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+        fpr = FP / (FP + TN) if (FP + TN) > 0 else 0.0
+        return fpr, tpr
+
+    # Storage
+    cost_simple = np.zeros((n_splits, len(taus)))
+    cost_full   = np.zeros((n_splits, len(taus)))
+    roc_simple_arr = np.zeros((n_splits, len(roc_fpr_grid)))
+    roc_full_arr   = np.zeros((n_splits, len(roc_fpr_grid)))
+    auc_simple = np.zeros(n_splits)
+    auc_full   = np.zeros(n_splits)
+    cost_tau_star_simple = np.zeros(n_splits)
+    cost_tau_star_full   = np.zeros(n_splits)
+    roc_tau_simple = np.zeros((n_splits, 2))
+    roc_tau_full   = np.zeros((n_splits, 2))
+
+    # Repeated splits
+    print("Train/test splitting will stratify on", response_name)
+    for i in range(n_splits):
+        train_df, test_df = sklearn_train_test_split(
+            df,
+            test_size=test_size,
+            random_state=seed + i,
+            stratify=df[response_name],
+        )
+        m_s = smf.logit(formula_simple, data=train_df).fit(disp=disp)
+        m_f = smf.logit(formula_full, data=train_df).fit(disp=disp)
+        y_test = test_df[response_name].values
+        p_s = m_s.predict(test_df)
+        p_f = m_f.predict(test_df)
+        for j, t in enumerate(taus):
+            cost_simple[i, j] = expected_cost(y_test, p_s, t)
+            cost_full[i, j]   = expected_cost(y_test, p_f, t)
+        cost_tau_star_simple[i] = expected_cost(y_test, p_s, tau_star)
+        cost_tau_star_full[i]   = expected_cost(y_test, p_f, tau_star)
+        roc_simple_arr[i] = interp_roc(y_test, p_s)
+        roc_full_arr[i]   = interp_roc(y_test, p_f)
+        roc_tau_simple[i] = roc_point_at_tau(y_test, p_s, tau_star)
+        roc_tau_full[i]   = roc_point_at_tau(y_test, p_f, tau_star)
+        auc_simple[i] = roc_auc_score(y_test, p_s)
+        auc_full[i]   = roc_auc_score(y_test, p_f)
+
+    # Summarize helper
+    def summarize(arr):
+        return (
+            arr.mean(axis=0),
+            np.quantile(arr, 0.025, axis=0),
+            np.quantile(arr, 0.975, axis=0),
+        )
+
+    # Plot 1: cost curves
+    cs_m, cs_lo, cs_hi = summarize(cost_simple)
+    cf_m, cf_lo, cf_hi = summarize(cost_full)
+
+    plt.figure()
+    plt.plot(taus, cs_m, label="Simple model")
+    plt.fill_between(taus, cs_lo, cs_hi, alpha=0.2)
+    plt.plot(taus, cf_m, label="Full model")
+    plt.fill_between(taus, cf_lo, cf_hi, alpha=0.2)
+    plt.axvline(tau_star, ls="--", label=f"\u03c4* = {tau_star:.3f}")
+    plt.xlabel("Threshold \u03c4")
+    plt.ylabel("Expected cost per patient ($)")
+    plt.title(f"Cost vs Threshold (mean \u00b1 95% band, {n_splits} splits)")
+    plt.legend()
+    plt.show()
+
+    # Plot 2: ROC curves
+    rs_m, rs_lo, rs_hi = summarize(roc_simple_arr)
+    rf_m, rf_lo, rf_hi = summarize(roc_full_arr)
+    roc_tau_simple_mean = roc_tau_simple.mean(axis=0)
+    roc_tau_full_mean   = roc_tau_full.mean(axis=0)
+
+    plt.figure()
+    plt.plot(roc_fpr_grid, rs_m, label=f"Simple (AUC={auc_simple.mean():.3f})")
+    plt.fill_between(roc_fpr_grid, rs_lo, rs_hi, alpha=0.2)
+    plt.plot(roc_fpr_grid, rf_m, label=f"Full (AUC={auc_full.mean():.3f})")
+    plt.fill_between(roc_fpr_grid, rf_lo, rf_hi, alpha=0.2)
+    plt.plot([0, 1], [0, 1], "k--", label="Random")
+    plt.plot(roc_tau_simple_mean[0], roc_tau_simple_mean[1], "o",
+             markersize=5, label="Simple @ \u03c4*")
+    plt.plot(roc_tau_full_mean[0], roc_tau_full_mean[1], "s",
+             markersize=5, label="Full @ \u03c4*")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title(f"ROC Curves with Cost-Optimal Operating Point (\u03c4* = {tau_star:.3f})")
+    plt.legend()
+    plt.show()
+
+    return {
+        "tau_star": tau_star,
+        "auc_simple": auc_simple,
+        "auc_full": auc_full,
+        "cost_tau_star_simple": cost_tau_star_simple,
+        "cost_tau_star_full": cost_tau_star_full,
+    }
+
+
+# =============================================================================
 # MODULE EXPORTS
 # =============================================================================
 
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 __all__ = [
     # Data classes
     'DescriptiveStats', 'NormalityTest', 'RegressionResults', 'ResidualDiagnostics',
@@ -10606,6 +11122,10 @@ __all__ = [
     'DecisionTreeResult', 'decision_tree', 'decision_tree_classification',
     'decision_tree_regression', 'plot_decision_tree_results',
     'save_decision_tree_predictions',
+
+    # NEW v2.7.0: STAT 7230 Advanced Utilities
+    'ci_mean', 'lr_test', 'abline', 'qq_plot', 'rmse_from_model',
+    'tukey_lsmeans', 'compare_classifiers',
 
     # Utilities
     'detect_outliers', 'recode', 'log_transform',

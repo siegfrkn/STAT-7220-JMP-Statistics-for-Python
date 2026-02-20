@@ -1,11 +1,11 @@
 # JMP-Stats: JMP-Style Statistical Analysis for Python
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Version 2.5.1](https://img.shields.io/badge/version-2.5.1-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
+[![Version 2.7.0](https://img.shields.io/badge/version-2.7.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
 
 A comprehensive Python library that replicates JMP's statistical analysis capabilities for predictive analytics. Designed for students and practitioners who want to perform the same analyses in Python that they would do in JMP.
 
-**Perfect for:** STAT 7220 - Predictive Analytics, STAT 7320, and similar courses.
+**Perfect for:** STAT 7220 - Predictive Analytics, STAT 7230 - Advanced Regression & Classification, STAT 7320, and similar courses.
 
 ---
 
@@ -27,6 +27,7 @@ A comprehensive Python library that replicates JMP's statistical analysis capabi
   - [Logistic Regression](#logistic-regression)
   - [Bootstrap Methods](#bootstrap-methods)
   - [K Nearest Neighbors](#k-nearest-neighbors)
+  - [STAT 7230: Advanced Regression & Classification](#stat-7230-advanced-regression--classification)
 - [Function Reference](#function-reference)
 - [Examples](#examples)
 - [Tips & Best Practices](#tips--best-practices)
@@ -39,7 +40,7 @@ A comprehensive Python library that replicates JMP's statistical analysis capabi
 ### Requirements
 
 ```bash
-pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn
+pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn patsy
 ```
 
 ### Setup
@@ -762,6 +763,99 @@ jmp.knn_lift_curve(result)
 
 ---
 
+### STAT 7230: Advanced Regression & Classification
+
+Utilities from STAT 7230 for regression diagnostics, classification comparison, and post-hoc analysis.
+
+#### Confidence Interval for a Mean
+
+```python
+avg, se, ci_low, ci_high = jmp.ci_mean(df['response'], level=0.95)
+# Prints: Sample Mean: 42.50
+#         95.0% Confidence Interval: (40.12, 44.88)
+```
+
+#### Likelihood Ratio Test
+
+Compare nested logistic regression models:
+
+```python
+import statsmodels.formula.api as smf
+
+base = smf.logit('y ~ x1', data=df).fit()
+full = smf.logit('y ~ x1 + x2 + x3', data=df).fit()
+
+result = jmp.lr_test(base, full)
+# Prints: LR = 12.345, df = 2, p = 0.00209
+```
+
+#### QQ Plot with Lilliefors Confidence Bounds
+
+Normal quantile plot with Lilliefors simultaneous confidence bands (Conover 1980), matching JMP's QQ plot:
+
+```python
+fig, ax = plt.subplots()
+jmp.qq_plot(residuals, ax, alpha=0.05)
+```
+
+#### RMSE from a Fitted Model
+
+```python
+import statsmodels.formula.api as smf
+
+model = smf.ols('y ~ x1 + x2', data=df).fit()
+rmse_val = jmp.rmse_from_model(model)
+# Prints: RMSE = 4.23
+```
+
+#### Reference Line (abline)
+
+```python
+fig, ax = plt.subplots()
+ax.scatter(x, y)
+jmp.abline(ax, b=0, m=1, color='red', linestyle='--')  # y = x line
+```
+
+#### Tukey LS Means with Compact Letter Display
+
+Compute regression-adjusted least-squares means and pairwise comparisons with a publication-ready figure:
+
+```python
+import statsmodels.formula.api as smf
+
+model = smf.ols('Sales ~ C(Region) + Advertising + Price', data=df).fit()
+cld_table = jmp.tukey_lsmeans(model, factor='Region', alpha=0.05)
+print(cld_table)
+#   Region   LSMean  CI_Lower  CI_Upper Group
+#    West     125.3    118.2     132.4     A
+#    East     119.7    112.8     126.6     A
+#    South    105.1     98.3     111.9     B
+```
+
+#### Compare Classifiers with Cost Curves
+
+Repeated train/test comparison of two logistic classifiers using custom cost matrices:
+
+```python
+result = jmp.compare_classifiers(
+    df,
+    formula_simple='Outcome ~ Age',
+    formula_full='Outcome ~ Age + BloodPressure + BMI',
+    cost_TN=0, cost_FP=100, cost_FN=500, cost_TP=50,
+    n_splits=30, seed=42
+)
+print(f"Optimal threshold: {result['tau_star']:.3f}")
+print(f"Mean AUC (simple): {result['auc_simple'].mean():.3f}")
+print(f"Mean AUC (full):   {result['auc_full'].mean():.3f}")
+```
+
+**Output includes:**
+- Cost curves (expected cost vs. threshold) with 95% bands
+- ROC curves with AUC and cost-optimal operating point
+- Per-split AUC and cost arrays for further analysis
+
+---
+
 ## Function Reference
 
 ### Data Import & Utilities
@@ -913,6 +1007,18 @@ jmp.knn_lift_curve(result)
 | `ljung_box_test()` | Ljung-Box autocorrelation test |
 | `plot_acf_pacf()` | ACF/PACF plots |
 | `plot_time_series_diagnostics()` | TS diagnostic plots |
+
+### STAT 7230: Advanced Regression & Classification
+
+| Function | Description |
+|----------|-------------|
+| `ci_mean()` | Confidence interval for a sample mean (normal approximation) |
+| `lr_test()` | Likelihood ratio test for nested logistic models |
+| `abline()` | Add a slope/intercept reference line to a matplotlib Axes |
+| `qq_plot()` | QQ plot with Lilliefors simultaneous confidence bounds (matches JMP) |
+| `rmse_from_model()` | Extract RMSE from a fitted statsmodels OLS model |
+| `tukey_lsmeans()` | Regression-adjusted LS means with CLD and publication figure |
+| `compare_classifiers()` | Repeated train/test cost-based comparison of two logistic classifiers |
 
 ---
 
@@ -1080,6 +1186,7 @@ Contributions welcome! Please submit issues and pull requests on GitHub.
 
 ## Version History
 
+- **v2.7.0** - Added STAT 7230 utilities: `ci_mean()`, `lr_test()`, `abline()`, `qq_plot()`, `rmse_from_model()`, `tukey_lsmeans()` (LS means with CLD), `compare_classifiers()` (cost-based logistic model comparison with ROC)
 - **v2.5.1** - Fixed RMSE calculation in `linear_regression()` and `linear_regression_formula()` to use `sqrt(MSE)` = `sqrt(SSE/(n-p))` matching JMP's definition (was previously computing `sqrt(SSE/n)`)
 - **v2.5.0** - Added K Nearest Neighbors (`k_nearest_neighbors()`, `knn_classification()`, `knn_regression()`), Bootstrap Methods (`bootstrap()`, `bootstrap_rmse()`), and Logistic Regression (`logistic_regression()`, `plot_logistic_roc()`, `roc_curve()`, `confusion_matrix_stats()`)
 - **v2.3.0** - Enhanced `linear_regression()` with `poly_degree`, `log_y`, `log_X` parameters; added `linear_regression_formula()` for categorical variables
