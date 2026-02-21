@@ -10,13 +10,22 @@ Installation Requirements:
     pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn patsy
 
 NEW IN v2.9.0:
-    - missing_summary(): Missing-values report with horizontal bar chart
-      (JMP's Cols > Missing Data Pattern)
-    - lift_at_percentile(): Lift at any percentile of predicted probabilities
-      (e.g. top 2%, top 5%) — generalises decile-based lift
-    - predict_logistic_at(): Predicted probability for a single observation
-      given predictor values as keyword arguments
-    - event_rate_by_group(): Event rate of binary outcome across levels of
+    - INTERACTIVE PLOTLY SUPPORT (optional, pip install plotly):
+        - plot_correlation_matrix(interactive=True): Hover for r-values & p-values
+        - plot_distribution(interactive=True) / distribution_analysis(interactive=True):
+          Hover on histogram bins, linked boxplot
+        - plot_logistic_roc(interactive=True): Hover for threshold/FPR/TPR at each
+          point on the ROC curve
+        - plot_binary_smooth(interactive=True): Zoom into low-probability regions
+          interactively instead of setting ylim manually
+    - EDA & MODEL EVALUATION UTILITIES:
+        - missing_summary(): Missing-values report with horizontal bar chart
+          (JMP's Cols > Missing Data Pattern)
+        - lift_at_percentile(): Lift at any percentile of predicted probabilities
+          (e.g. top 2%, top 5%) — generalises decile-based lift
+        - predict_logistic_at(): Predicted probability for a single observation
+          given predictor values as keyword arguments
+        - event_rate_by_group(): Event rate of binary outcome across levels of
       a categorical variable with colour-coded bar chart (JMP's Fit Y by X)
 
 NEW IN v2.8.0:
@@ -320,6 +329,24 @@ try:
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
+
+# Optional interactive plotting library
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    from plotly.subplots import make_subplots
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
+
+
+def _require_plotly(func_name: str) -> None:
+    """Raise with a helpful message when plotly is needed but not installed."""
+    if not HAS_PLOTLY:
+        raise ImportError(
+            f"{func_name}(interactive=True) requires plotly. "
+            "Install it with:  pip install plotly"
+        )
 
 
 # =============================================================================
@@ -1797,39 +1824,110 @@ def stepwise_regression(y: Union[pd.Series, np.ndarray], X: pd.DataFrame,
 
 def plot_distribution(data: Union[pd.Series, np.ndarray], title: str = "Distribution",
                       bins: int = 30, show_stats: bool = True,
-                      figsize: Tuple[int, int] = (12, 8)) -> Optional[Any]:
-    """Create JMP-style distribution plot with histogram, box plot, and normal overlay."""
+                      figsize: Tuple[int, int] = (12, 8),
+                      interactive: bool = False) -> Optional[Any]:
+    """
+    Create JMP-style distribution plot with histogram, box plot, and normal overlay.
+
+    Parameters
+    ----------
+    data : array-like
+        Numeric data.
+    title : str
+        Plot title.
+    bins : int
+        Number of histogram bins.
+    show_stats : bool
+        Show summary statistics panel.
+    figsize : tuple
+        Figure size (matplotlib only).
+    interactive : bool, default False
+        If True, return an interactive Plotly figure with hover on histogram
+        bins and a linked box-plot.  Requires ``pip install plotly``.
+
+    Returns
+    -------
+    matplotlib.figure.Figure, plotly.graph_objects.Figure, or None
+    """
+    arr = _to_clean_array(data)
+
+    # ---- Interactive (Plotly) path ----
+    if interactive:
+        _require_plotly('plot_distribution')
+        desc = describe(arr)
+        mu, sigma = norm.fit(arr)
+        x_norm = np.linspace(arr.min(), arr.max(), 200)
+        y_norm = norm.pdf(x_norm, mu, sigma)
+
+        fig = make_subplots(
+            rows=2, cols=1, row_heights=[0.75, 0.25],
+            shared_xaxes=True, vertical_spacing=0.05,
+        )
+        # Histogram with hover
+        fig.add_trace(go.Histogram(
+            x=arr, nbinsx=bins, histnorm='probability density',
+            marker_color='steelblue', opacity=0.7,
+            hovertemplate='Bin: %{x:.3f}<br>Density: %{y:.4f}<extra></extra>',
+            name='Histogram',
+        ), row=1, col=1)
+        # Normal overlay
+        fig.add_trace(go.Scatter(
+            x=x_norm, y=y_norm, mode='lines',
+            line=dict(color='red', width=2),
+            name=f'Normal (\u03bc={mu:.2f}, \u03c3={sigma:.2f})',
+            hovertemplate='x=%{x:.3f}<br>density=%{y:.4f}<extra></extra>',
+        ), row=1, col=1)
+        # Boxplot
+        fig.add_trace(go.Box(
+            x=arr, marker_color='steelblue', name='Box',
+            hovertemplate='%{x:.4f}<extra></extra>',
+        ), row=2, col=1)
+
+        stats_text = (
+            f"N={desc.n}  Mean={desc.mean:.4f}  Std={desc.std:.4f}  "
+            f"Min={desc.min:.4f}  Q1={desc.q1:.4f}  Median={desc.median:.4f}  "
+            f"Q3={desc.q3:.4f}  Max={desc.max:.4f}  "
+            f"Skew={desc.skewness:.2f}  Kurt={desc.kurtosis:.2f}"
+        )
+        fig.update_layout(
+            title=f'{title}<br><sub>{stats_text}</sub>' if show_stats else title,
+            showlegend=True, height=500, width=800,
+        )
+        fig.update_xaxes(title_text='Value', row=2, col=1)
+        fig.update_yaxes(title_text='Density', row=1, col=1)
+        fig.show()
+        return fig
+
+    # ---- Static (matplotlib) path ----
     if not HAS_MATPLOTLIB:
         print("matplotlib required for plotting")
         return None
-    
-    arr = _to_clean_array(data)
-    
+
     fig, axes = plt.subplots(2, 2, figsize=figsize)
-    
+
     ax1 = axes[0, 0]
     n, bins_arr, patches = ax1.hist(arr, bins=bins, density=True, alpha=0.7, edgecolor='black')
     mu, sigma = norm.fit(arr)
     x = np.linspace(arr.min(), arr.max(), 100)
-    ax1.plot(x, norm.pdf(x, mu, sigma), 'r-', lw=2, label=f'Normal (μ={mu:.2f}, σ={sigma:.2f})')
+    ax1.plot(x, norm.pdf(x, mu, sigma), 'r-', lw=2, label=f'Normal (\u03bc={mu:.2f}, \u03c3={sigma:.2f})')
     ax1.set_xlabel('Value')
     ax1.set_ylabel('Density')
     ax1.set_title(f'{title} - Histogram')
     ax1.legend()
-    
+
     ax2 = axes[0, 1]
     bp = ax2.boxplot(arr, vert=True, patch_artist=True)
     bp['boxes'][0].set_facecolor('lightblue')
     ax2.set_ylabel('Value')
     ax2.set_title(f'{title} - Box Plot')
-    
+
     ax3 = axes[1, 0]
     qq_plot(arr, ax3, dist="norm", alpha=0.05)
     ax3.set_title(f'{title} - Normal Q-Q Plot')
-    
+
     ax4 = axes[1, 1]
     ax4.axis('off')
-    
+
     if show_stats:
         desc = describe(arr)
         stats_text = f"""
@@ -1846,9 +1944,9 @@ Max:        {desc.max:.4f}
 Skewness:   {desc.skewness:.4f}
 Kurtosis:   {desc.kurtosis:.4f}
 """
-        ax4.text(0.1, 0.5, stats_text, transform=ax4.transAxes, 
+        ax4.text(0.1, 0.5, stats_text, transform=ax4.transAxes,
                 fontsize=11, verticalalignment='center', fontfamily='monospace')
-    
+
     plt.tight_layout()
     return fig
 
@@ -1949,16 +2047,91 @@ def plot_scatter_with_regression(x: Union[pd.Series, np.ndarray], y: Union[pd.Se
 
 
 def plot_correlation_matrix(df: pd.DataFrame, figsize: Tuple[int, int] = (12, 10),
-                            annot: bool = True) -> Optional[Any]:
-    """Create correlation matrix heatmap."""
-    if not HAS_MATPLOTLIB:
-        return None
-    
+                            annot: bool = True,
+                            interactive: bool = False) -> Optional[Any]:
+    """
+    Create correlation matrix heatmap.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input data (numeric columns are auto-selected).
+    figsize : tuple, default (12, 10)
+        Figure size (matplotlib only).
+    annot : bool, default True
+        Annotate cells with r-values.
+    interactive : bool, default False
+        If True, return an interactive Plotly heatmap with hover showing
+        r-values and p-values.  Requires ``pip install plotly``.
+
+    Returns
+    -------
+    matplotlib.figure.Figure, plotly.graph_objects.Figure, or None
+    """
     numeric_df = df.select_dtypes(include=[np.number])
     corr_matrix = numeric_df.corr()
-    
+
+    # ---- Interactive (Plotly) path ----
+    if interactive:
+        _require_plotly('plot_correlation_matrix')
+        cols = corr_matrix.columns.tolist()
+        n = len(cols)
+
+        # Compute p-value matrix
+        pval = np.ones((n, n))
+        for i in range(n):
+            for j in range(i + 1, n):
+                mask = numeric_df[[cols[i], cols[j]]].dropna()
+                if len(mask) >= 3:
+                    _, p = pearsonr(mask.iloc[:, 0], mask.iloc[:, 1])
+                    pval[i, j] = p
+                    pval[j, i] = p
+
+        # Build hover text
+        hover = []
+        for i in range(n):
+            row = []
+            for j in range(n):
+                r = corr_matrix.iloc[i, j]
+                p = pval[i, j]
+                sig = '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else ''
+                row.append(
+                    f"<b>{cols[i]}</b> vs <b>{cols[j]}</b><br>"
+                    f"r = {r:.4f} {sig}<br>p = {p:.4g}"
+                )
+            hover.append(row)
+
+        fig = go.Figure(data=go.Heatmap(
+            z=corr_matrix.values,
+            x=cols, y=cols,
+            text=hover, hoverinfo='text',
+            colorscale='RdBu_r', zmid=0, zmin=-1, zmax=1,
+            colorbar=dict(title='r'),
+        ))
+        # Add annotation text
+        if annot:
+            for i in range(n):
+                for j in range(n):
+                    fig.add_annotation(
+                        x=cols[j], y=cols[i],
+                        text=f"{corr_matrix.iloc[i, j]:.2f}",
+                        showarrow=False,
+                        font=dict(size=10,
+                                  color='white' if abs(corr_matrix.iloc[i, j]) > 0.5 else 'black'),
+                    )
+        fig.update_layout(
+            title='Correlation Matrix (hover for p-values)',
+            width=max(600, n * 80), height=max(500, n * 70),
+        )
+        fig.show()
+        return fig
+
+    # ---- Static (matplotlib) path ----
+    if not HAS_MATPLOTLIB:
+        return None
+
     fig, ax = plt.subplots(figsize=figsize)
-    
+
     if HAS_SEABORN:
         sns.heatmap(corr_matrix, annot=annot, cmap='RdBu_r', center=0,
                    vmin=-1, vmax=1, ax=ax, fmt='.2f')
@@ -1973,7 +2146,7 @@ def plot_correlation_matrix(df: pd.DataFrame, figsize: Tuple[int, int] = (12, 10
             for i in range(len(corr_matrix)):
                 for j in range(len(corr_matrix)):
                     ax.text(j, i, f'{corr_matrix.iloc[i, j]:.2f}', ha='center', va='center')
-    
+
     ax.set_title('Correlation Matrix')
     plt.tight_layout()
     return fig
@@ -2088,16 +2261,34 @@ def fit_model(data: pd.DataFrame, response: str, predictors: List[str],
 
 
 def distribution_analysis(data: Union[pd.Series, np.ndarray], name: str = "Variable",
-                          plot: bool = True) -> Dict[str, Any]:
-    """JMP-style Distribution analysis - descriptive stats, normality tests, and plots."""
+                          plot: bool = True,
+                          interactive: bool = False) -> Dict[str, Any]:
+    """
+    JMP-style Distribution analysis - descriptive stats, normality tests, and plots.
+
+    Parameters
+    ----------
+    data : array-like
+        Numeric data.
+    name : str
+        Variable name (used as plot title).
+    plot : bool, default True
+        Whether to display the plot.
+    interactive : bool, default False
+        If True, produce an interactive Plotly figure instead of matplotlib.
+        Requires ``pip install plotly``.
+    """
     desc = describe(data)
     norm_test = test_normality(data)
-    
+
     result = {'descriptive': desc, 'normality': norm_test, 'figure': None}
-    
-    if plot and HAS_MATPLOTLIB:
-        result['figure'] = plot_distribution(data, title=name)
-    
+
+    if plot:
+        if interactive:
+            result['figure'] = plot_distribution(data, title=name, interactive=True)
+        elif HAS_MATPLOTLIB:
+            result['figure'] = plot_distribution(data, title=name)
+
     return result
 
 
@@ -8204,41 +8395,102 @@ def plot_logistic_spline_comparison(
 
 def plot_logistic_roc(
     result: LogisticRegressionResults,
-    figsize: Tuple[int, int] = (12, 5)
+    figsize: Tuple[int, int] = (12, 5),
+    interactive: bool = False
 ) -> Optional[Any]:
     """
     Plot ROC curve and confusion matrix for logistic regression.
-    
+
     Parameters
     ----------
     result : LogisticRegressionResults
         Results from logistic_regression()
     figsize : tuple, default=(12, 5)
-        Figure size
-        
+        Figure size (matplotlib only)
+    interactive : bool, default False
+        If True, return an interactive Plotly ROC curve where hovering
+        reveals the threshold, FPR, and TPR at each point.
+        Requires ``pip install plotly``.
+
     Returns
     -------
-    matplotlib.figure.Figure or None
+    matplotlib.figure.Figure, plotly.graph_objects.Figure, or None
     """
-    if not HAS_MATPLOTLIB:
-        return None
-    
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
-    
-    # ROC Curve
-    ax1 = axes[0]
     y_true = (result.y_actual == result.target_level).astype(int)
     y_prob = result.predicted_probs[f'Prob[{result.target_level}]']
-    
-    # Calculate ROC curve points
-    fpr_list, tpr_list, thresholds = _roc_curve_points(y_true, y_prob, 100)
+    fpr_list, tpr_list, thresholds = _roc_curve_points(y_true, y_prob, 200)
 
-    # Calculate AUC using trapezoidal rule
     sorted_indices = np.argsort(fpr_list)
     fpr_sorted = fpr_list[sorted_indices]
     tpr_sorted = tpr_list[sorted_indices]
     auc = np.trapz(tpr_sorted, fpr_sorted)
-    
+
+    # ---- Interactive (Plotly) path ----
+    if interactive:
+        _require_plotly('plot_logistic_roc')
+
+        # ROC subplot + confusion matrix table
+        fig = make_subplots(
+            rows=1, cols=2, column_widths=[0.6, 0.4],
+            specs=[[{'type': 'xy'}, {'type': 'table'}]],
+            subplot_titles=[f'ROC Curve (AUC = {auc:.4f})',
+                            f'Confusion Matrix (Threshold = {result.threshold})'],
+        )
+
+        # ROC curve with threshold hover
+        hover_text = [
+            f"Threshold: {t:.4f}<br>FPR: {f:.4f}<br>TPR: {tp:.4f}"
+            for t, f, tp in zip(thresholds[sorted_indices],
+                                fpr_sorted, tpr_sorted)
+        ]
+        fig.add_trace(go.Scatter(
+            x=fpr_sorted, y=tpr_sorted,
+            mode='lines', line=dict(color='royalblue', width=2.5),
+            fill='tozeroy', fillcolor='rgba(65,105,225,0.15)',
+            text=hover_text, hoverinfo='text',
+            name=f'ROC (AUC={auc:.4f})',
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[0, 1], mode='lines',
+            line=dict(color='red', dash='dash', width=1),
+            name='Random', hoverinfo='skip',
+        ), row=1, col=1)
+
+        # Confusion matrix as table
+        conf = result.confusion_matrix
+        levels = result.response_levels
+        header_vals = ['Actual \\ Predicted'] + [str(l) for l in levels]
+        cell_rows = []
+        for i, lev in enumerate(levels):
+            row = [str(lev)]
+            for j in range(len(levels)):
+                row.append(str(int(conf.iloc[i, j])))
+            cell_rows.append(row)
+        # Transpose for Plotly table (column-major)
+        cell_vals = list(zip(*cell_rows))
+        fig.add_trace(go.Table(
+            header=dict(values=header_vals, align='center',
+                        font=dict(size=12)),
+            cells=dict(values=cell_vals, align='center',
+                       font=dict(size=12)),
+        ), row=1, col=2)
+
+        fig.update_xaxes(title_text='FPR (1 - Specificity)', row=1, col=1,
+                         range=[0, 1])
+        fig.update_yaxes(title_text='TPR (Sensitivity)', row=1, col=1,
+                         range=[0, 1])
+        fig.update_layout(height=500, width=950, showlegend=True)
+        fig.show()
+        return fig
+
+    # ---- Static (matplotlib) path ----
+    if not HAS_MATPLOTLIB:
+        return None
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+
+    # ROC Curve
+    ax1 = axes[0]
     ax1.plot(fpr_list, tpr_list, 'b-', linewidth=2, label=f'ROC Curve (AUC = {auc:.4f})')
     ax1.plot([0, 1], [0, 1], 'r--', linewidth=1, label='Random Classifier')
     ax1.fill_between(fpr_sorted, tpr_sorted, alpha=0.3)
@@ -8249,22 +8501,22 @@ def plot_logistic_roc(
     ax1.grid(True, alpha=0.3)
     ax1.set_xlim([0, 1])
     ax1.set_ylim([0, 1])
-    
+
     # Confusion Matrix Heatmap
     ax2 = axes[1]
     conf_matrix = result.confusion_matrix
     conf_normalized = conf_matrix.div(conf_matrix.sum(axis=1), axis=0).fillna(0)
-    
+
     im = ax2.imshow(conf_normalized.values, cmap='Blues', aspect='auto', vmin=0, vmax=1)
-    
+
     for i in range(len(result.response_levels)):
         for j in range(len(result.response_levels)):
             count = conf_matrix.iloc[i, j]
             pct = conf_normalized.iloc[i, j] * 100
             color = 'white' if conf_normalized.iloc[i, j] > 0.5 else 'black'
-            ax2.text(j, i, f'{count}\n({pct:.1f}%)', ha='center', va='center', 
+            ax2.text(j, i, f'{count}\n({pct:.1f}%)', ha='center', va='center',
                     color=color, fontsize=10)
-    
+
     ax2.set_xticks(range(len(result.response_levels)))
     ax2.set_yticks(range(len(result.response_levels)))
     ax2.set_xticklabels(result.response_levels, fontsize=10)
@@ -8273,10 +8525,10 @@ def plot_logistic_roc(
     ax2.set_ylabel('Actual', fontsize=11)
     ax2.set_title(f'Confusion Matrix (Threshold = {result.threshold})', fontsize=12)
     plt.colorbar(im, ax=ax2, label='Proportion')
-    
+
     plt.tight_layout()
     plt.show()
-    
+
     return fig
 
 
@@ -10653,7 +10905,8 @@ def plot_binary_smooth(
     xlabel: Optional[str] = None,
     ylabel: Optional[str] = None,
     title: Optional[str] = None,
-    figsize: Tuple[int, int] = (10, 6)
+    figsize: Tuple[int, int] = (10, 6),
+    interactive: bool = False
 ) -> Optional[Any]:
     """
     Plot a binary outcome (0/1) against a continuous predictor with a
@@ -10702,11 +10955,14 @@ def plot_binary_smooth(
     title : str, optional
         Plot title. Default: auto-generated
     figsize : tuple, default=(10, 6)
-        Figure size
+        Figure size (matplotlib only)
+    interactive : bool, default False
+        If True, return an interactive Plotly figure with zoom/pan and
+        hover on the smooth curve.  Requires ``pip install plotly``.
 
     Returns
     -------
-    matplotlib.figure.Figure or None
+    matplotlib.figure.Figure, plotly.graph_objects.Figure, or None
 
     Examples
     --------
@@ -10719,61 +10975,125 @@ def plot_binary_smooth(
     >>> # Use spline instead of LOWESS
     >>> jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'],
     ...                        smoother='spline', spline_df=5)
+
+    >>> # Interactive (Plotly) — zoom freely without setting ylim
+    >>> jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'],
+    ...                        interactive=True)
     """
+    y_arr = np.asarray(y).ravel().astype(float)
+    x_arr = np.asarray(x).ravel().astype(float)
+
+    # Drop NaNs (paired)
+    mask = ~(np.isnan(y_arr) | np.isnan(x_arr))
+    y_arr, x_arr = y_arr[mask], x_arr[mask]
+
+    x_min, x_max = x_arr.min(), x_arr.max()
+
+    # -- compute smooth curve (shared by both paths) --
+    smooth_x: Optional[np.ndarray] = None
+    smooth_y: Optional[np.ndarray] = None
+    smooth_label = ''
+
+    if smoother == 'lowess':
+        from statsmodels.nonparametric.smoothers_lowess import lowess as _lowess
+        smoothed = _lowess(y_arr, x_arr, frac=frac, return_sorted=True)
+        smooth_x, smooth_y = smoothed[:, 0], smoothed[:, 1]
+        smooth_label = f'LOWESS (frac={frac})'
+    elif smoother == 'spline':
+        spline_obj, lam, edf = _fit_smoothing_spline(
+            x_arr, y_arr, spline_lambda=spline_lambda, spline_df=spline_df
+        )
+        smooth_x = np.linspace(x_min, x_max, 300)
+        smooth_y = np.clip(spline_obj(smooth_x), 0, 1)
+        smooth_label = f'Spline (\u03bb={lam:.1f}, df={edf:.1f})'
+    else:
+        raise ValueError(f"smoother must be 'lowess' or 'spline', got '{smoother}'")
+
+    # -- compute logistic overlay (shared) --
+    logistic_x: Optional[np.ndarray] = None
+    logistic_y: Optional[np.ndarray] = None
+    if show_logistic and HAS_STATSMODELS:
+        X_design = sm.add_constant(x_arr)
+        try:
+            logit_fit = sm.Logit(y_arr, X_design).fit(disp=0)
+            logistic_x = np.linspace(x_min, x_max, 300)
+            logistic_y = logit_fit.predict(sm.add_constant(logistic_x))
+        except Exception:
+            pass
+
+    plot_xlabel = xlabel or 'X'
+    plot_ylabel = ylabel or 'P(Y=1)'
+    plot_title = title or 'Binary Smooth: Checking Logistic Model Adequacy'
+
+    # ---- Interactive (Plotly) path ----
+    if interactive:
+        _require_plotly('plot_binary_smooth')
+
+        fig = go.Figure()
+
+        # Raw observations (jittered for visibility)
+        fig.add_trace(go.Scatter(
+            x=x_arr, y=y_arr,
+            mode='markers',
+            marker=dict(color='steelblue', size=4, opacity=0.15),
+            name='Observations',
+            hovertemplate='x=%{x:.4f}<br>y=%{y}<extra></extra>',
+        ))
+
+        # Smooth curve with hover
+        fig.add_trace(go.Scatter(
+            x=smooth_x, y=smooth_y,
+            mode='lines', line=dict(color='#ff7f0e', width=2.5),
+            name=smooth_label,
+            hovertemplate='x=%{x:.4f}<br>P(Y=1)=%{y:.5f}<extra></extra>',
+        ))
+
+        # Logistic overlay
+        if logistic_x is not None:
+            fig.add_trace(go.Scatter(
+                x=logistic_x, y=logistic_y,
+                mode='lines', line=dict(color='royalblue', width=2),
+                name='Logistic Fit',
+                hovertemplate='x=%{x:.4f}<br>P(Y=1)=%{y:.5f}<extra></extra>',
+            ))
+
+        yaxis_opts = dict(title=plot_ylabel)
+        if ylim is not None:
+            yaxis_opts['range'] = list(ylim)
+
+        fig.update_layout(
+            title=plot_title,
+            xaxis_title=plot_xlabel,
+            yaxis=yaxis_opts,
+            height=500, width=800,
+            showlegend=True,
+        )
+        fig.show()
+        return fig
+
+    # ---- Static (matplotlib) path ----
     if not HAS_MATPLOTLIB:
         print("matplotlib required for plotting")
         return None
 
-    y = np.asarray(y).ravel().astype(float)
-    x = np.asarray(x).ravel().astype(float)
-
-    # Drop NaNs (paired)
-    mask = ~(np.isnan(y) | np.isnan(x))
-    y, x = y[mask], x[mask]
-
     fig, ax = plt.subplots(figsize=figsize)
 
-    # Scatter of raw 0/1 observations
-    ax.scatter(x, y, alpha=0.15, s=15, c='steelblue', edgecolors='none',
+    ax.scatter(x_arr, y_arr, alpha=0.15, s=15, c='steelblue', edgecolors='none',
                label='Observations')
 
-    # Smooth curve
-    x_min, x_max = x.min(), x.max()
-
     if smoother == 'lowess':
-        from statsmodels.nonparametric.smoothers_lowess import lowess
-        smoothed = lowess(y, x, frac=frac, return_sorted=True)
-        ax.plot(smoothed[:, 0], smoothed[:, 1], color='#ff7f0e',
-                linewidth=2.5, label=f'LOWESS (frac={frac})')
-    elif smoother == 'spline':
-        spline_obj, lam, edf = _fit_smoothing_spline(
-            x, y, spline_lambda=spline_lambda, spline_df=spline_df
-        )
-        x_grid = np.linspace(x_min, x_max, 300)
-        y_spline = np.clip(spline_obj(x_grid), 0, 1)
-        ax.plot(x_grid, y_spline, color='#ff7f0e', linewidth=2.5,
-                linestyle='--',
-                label=f'Spline (\u03bb={lam:.1f}, df={edf:.1f})')
+        ax.plot(smooth_x, smooth_y, color='#ff7f0e', linewidth=2.5,
+                label=smooth_label)
     else:
-        raise ValueError(f"smoother must be 'lowess' or 'spline', got '{smoother}'")
+        ax.plot(smooth_x, smooth_y, color='#ff7f0e', linewidth=2.5,
+                linestyle='--', label=smooth_label)
 
-    # Optional parametric logistic overlay
-    if show_logistic and HAS_STATSMODELS:
-        X_design = sm.add_constant(x)
-        try:
-            logit_fit = sm.Logit(y, X_design).fit(disp=0)
-            x_grid = np.linspace(x_min, x_max, 300)
-            X_grid = sm.add_constant(x_grid)
-            p_logistic = logit_fit.predict(X_grid)
-            ax.plot(x_grid, p_logistic, 'b-', linewidth=2,
-                    label='Logistic Fit')
-        except Exception:
-            pass  # silently skip if logistic fit fails
+    if logistic_x is not None:
+        ax.plot(logistic_x, logistic_y, 'b-', linewidth=2, label='Logistic Fit')
 
-    ax.set_xlabel(xlabel or 'X', fontsize=12)
-    ax.set_ylabel(ylabel or 'P(Y=1)', fontsize=12)
-    ax.set_title(title or 'Binary Smooth: Checking Logistic Model Adequacy',
-                 fontsize=12)
+    ax.set_xlabel(plot_xlabel, fontsize=12)
+    ax.set_ylabel(plot_ylabel, fontsize=12)
+    ax.set_title(plot_title, fontsize=12)
 
     if ylim is not None:
         ax.set_ylim(ylim)

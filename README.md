@@ -29,6 +29,7 @@ A comprehensive Python library that replicates JMP's statistical analysis capabi
   - [K Nearest Neighbors](#k-nearest-neighbors)
   - [STAT 7230: Advanced Regression & Classification](#stat-7230-advanced-regression--classification)
   - [EDA & Model Evaluation Utilities](#eda--model-evaluation-utilities)
+  - [Interactive Plots (Plotly)](#interactive-plots-plotly)
 - [Function Reference](#function-reference)
 - [Examples](#examples)
 - [Tips & Best Practices](#tips--best-practices)
@@ -42,6 +43,12 @@ A comprehensive Python library that replicates JMP's statistical analysis capabi
 
 ```bash
 pip install numpy pandas scipy statsmodels matplotlib seaborn scikit-learn patsy
+```
+
+**Optional** — for interactive plots (hover, zoom, pan):
+
+```bash
+pip install plotly
 ```
 
 ### Setup
@@ -944,6 +951,26 @@ rates = jmp.event_rate_by_group(df, 'BinaryVolQuit', 'Business Area',
 
 ---
 
+### Interactive Plots (Plotly)
+
+New in **v2.9.0**: Four high-value plotting functions accept `interactive=True` to produce interactive Plotly figures with hover, zoom, and pan. Requires `pip install plotly`. Default is `False` (static matplotlib).
+
+```python
+# Correlation matrix — hover shows r-value AND p-value for each pair
+jmp.plot_correlation_matrix(df[cols], interactive=True)
+
+# Distribution — hover on histogram bins, linked boxplot
+jmp.distribution_analysis(df['Compa Ratio'], name='Compa Ratio', interactive=True)
+
+# ROC curve — hover reveals threshold, FPR, TPR at each point
+jmp.plot_logistic_roc(result, interactive=True)
+
+# Binary smooth — zoom into low-probability regions instead of setting ylim
+jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'], interactive=True)
+```
+
+---
+
 ## Function Reference
 
 ### Data Import & Utilities
@@ -1285,7 +1312,7 @@ Contributions welcome! Please submit issues and pull requests on GitHub.
 
 ## Version History
 
-- **v2.9.0** - Added EDA & model evaluation utilities: `missing_summary()` for missing-values report (JMP's Cols > Missing Data Pattern), `lift_at_percentile()` for lift at any percentile, `predict_logistic_at()` for single-observation predictions, `event_rate_by_group()` for binary event rates across categorical groups (JMP's Fit Y by X)
+- **v2.9.0** - Added optional interactive Plotly support (`interactive=True`) for `plot_correlation_matrix()`, `plot_distribution()` / `distribution_analysis()`, `plot_logistic_roc()`, and `plot_binary_smooth()`. Added EDA & model evaluation utilities: `missing_summary()`, `lift_at_percentile()`, `predict_logistic_at()`, `event_rate_by_group()`
 - **v2.8.0** - Added `confusion_matrix_at_cutoff()` for JMP-style confusion matrix at any probability threshold (Predicted Count/Rate tables, FPR, FNR), and `plot_binary_smooth()` for nonparametric LOWESS/spline smooth of binary Y vs continuous X (matches JMP's Bivariate Kernel Smoother)
 - **v2.7.0** - Added STAT 7230 utilities: `ci_mean()`, `lr_test()`, `abline()`, `qq_plot()`, `rmse_from_model()`, `tukey_lsmeans()` (LS means with CLD), `compare_classifiers()` (cost-based logistic model comparison with ROC)
 - **v2.5.1** - Fixed RMSE calculation in `linear_regression()` and `linear_regression_formula()` to use `sqrt(MSE)` = `sqrt(SSE/(n-p))` matching JMP's definition (was previously computing `sqrt(SSE/n)`)
