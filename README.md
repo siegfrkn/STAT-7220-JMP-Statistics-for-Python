@@ -1,7 +1,7 @@
 # JMP-Stats: JMP-Style Statistical Analysis for Python
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![Version 2.9.0](https://img.shields.io/badge/version-2.9.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
+[![Version 2.11.0](https://img.shields.io/badge/version-2.11.0-green.svg)](https://github.com/siegfrkn/STAT-7220-JMP-Statistics-for-Python)
 
 A comprehensive Python library that replicates JMP's statistical analysis capabilities for predictive analytics. Designed for students and practitioners who want to perform the same analyses in Python that they would do in JMP.
 
@@ -938,6 +938,36 @@ p = jmp.predict_logistic_at(result, Compa_Ratio=0.5)
 p = jmp.predict_logistic_at(result, Compa_Ratio=0.5, Age=35)
 ```
 
+#### Print Probability Formula
+
+Display the logistic regression equation (JMP's "Save Probability Formula"):
+
+```python
+# After fitting a logistic model
+result = jmp.logistic_regression(df['Voluntary'], df[['Compa Ratio']], plot=False)
+
+# Print the logit and probability equations
+formula = jmp.print_probability_formula(result)
+# logit(P) = -3.610189 + (-1.098241) * Compa Ratio
+# P(1) = 1 / (1 + exp(-(-3.610189 + (-1.098241) * Compa Ratio)))
+```
+
+#### Compare Logistic Models
+
+Compare multiple fitted models in a single summary table:
+
+```python
+cr_model = jmp.logistic_regression(df['Vol'], df[['Compa Ratio']], plot=False)
+age_model = jmp.logistic_regression(df['Vol'], df[['Age']], plot=False)
+null_model = jmp.logistic_regression(df['Vol'], df[['Age']].iloc[:, :0], plot=False)
+
+df_cmp = jmp.compare_logistic_models(
+    [cr_model, age_model, null_model],
+    names=['Compa Ratio', 'Age', 'Intercept-only']
+)
+# Prints: Model, N, -LogLikelihood, DF, LR ChiSq, Prob>ChiSq, R²(U), AIC, BIC, AUC
+```
+
 #### Event Rate by Group
 
 ```python
@@ -1043,6 +1073,12 @@ jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'], interactive=True)
 | `plot_logistic_roc()` | ROC curve visualization with AUC |
 | `roc_curve()` | Standalone ROC curve calculation |
 | `confusion_matrix_stats()` | Classification metrics (accuracy, sensitivity, specificity, F1) |
+| `save_logistic_predictions()` | Save predicted probabilities and classifications (JMP's Save Columns) |
+| `print_probability_formula()` | Print the logit and probability equations (JMP's Save Probability Formula) |
+| `logistic_decile_analysis()` | Decile-based analysis of predicted probabilities |
+| `plot_logistic_lift()` | Cumulative gains and lift bar chart |
+| `plot_logistic_calibration()` | Calibration plot (predicted vs actual probabilities) |
+| `plot_logistic_spline_comparison()` | Compare logistic fit with smoothing spline |
 
 ### Bootstrap Methods
 
@@ -1143,6 +1179,7 @@ jmp.plot_binary_smooth(df['BinaryVolQuit'], df['Compa Ratio'], interactive=True)
 |----------|-------------|
 | `missing_summary()` | Missing-values report with horizontal bar chart (JMP's Cols > Missing Data Pattern) |
 | `lift_at_percentile()` | Lift at any percentile of predicted probabilities (top 2 %, 5 %, etc.) |
+| `compare_logistic_models()` | Side-by-side comparison table of multiple logistic models (AIC, BIC, AUC, etc.) |
 | `predict_logistic_at()` | Predicted probability at a single observation via keyword arguments |
 | `event_rate_by_group()` | Event rate of binary outcome across categorical levels with colour-coded chart |
 
@@ -1312,6 +1349,8 @@ Contributions welcome! Please submit issues and pull requests on GitHub.
 
 ## Version History
 
+- **v2.11.0** - Added `print_probability_formula()` for JMP-style probability formula display and `compare_logistic_models()` for side-by-side model comparison tables. Added missing `__all__` exports for `logistic_decile_analysis()`, `plot_logistic_lift()`, `plot_logistic_calibration()`, `plot_logistic_spline_comparison()`, `save_logistic_predictions()`
+- **v2.10.0** - Added `plot_scatterplot_matrix()` for pairwise scatter plots
 - **v2.9.0** - Added optional interactive Plotly support (`interactive=True`) for `plot_correlation_matrix()`, `plot_distribution()` / `distribution_analysis()`, `plot_logistic_roc()`, and `plot_binary_smooth()`. Added EDA & model evaluation utilities: `missing_summary()`, `lift_at_percentile()`, `predict_logistic_at()`, `event_rate_by_group()`
 - **v2.8.0** - Added `confusion_matrix_at_cutoff()` for JMP-style confusion matrix at any probability threshold (Predicted Count/Rate tables, FPR, FNR), and `plot_binary_smooth()` for nonparametric LOWESS/spline smooth of binary Y vs continuous X (matches JMP's Bivariate Kernel Smoother)
 - **v2.7.0** - Added STAT 7230 utilities: `ci_mean()`, `lr_test()`, `abline()`, `qq_plot()`, `rmse_from_model()`, `tukey_lsmeans()` (LS means with CLD), `compare_classifiers()` (cost-based logistic model comparison with ROC)

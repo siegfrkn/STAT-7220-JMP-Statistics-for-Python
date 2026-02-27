@@ -7739,6 +7739,61 @@ def save_logistic_predictions(
     return output
 
 
+def print_probability_formula(
+    result: LogisticRegressionResults,
+    verbose: bool = True
+) -> str:
+    """
+    Print the explicit logistic probability formula from a fitted model.
+
+    Mirrors JMP's **Save Probability Formula** output: displays the logit
+    (linear predictor) equation and the corresponding inverse-logit
+    probability equation using the estimated coefficient values.
+
+    Parameters
+    ----------
+    result : LogisticRegressionResults
+        Fitted logistic regression result from ``logistic_regression()``.
+    verbose : bool, default True
+        Print the formula to stdout.
+
+    Returns
+    -------
+    str
+        Multi-line string containing both the logit and probability
+        equations.
+
+    Examples
+    --------
+    >>> formula = jmp.print_probability_formula(cr_model)
+    >>> # logit(P) = -3.6102 + (-1.0982) * Compa Ratio
+    >>> # P(1) = 1 / (1 + exp(-(-3.6102 + (-1.0982) * Compa Ratio)))
+    """
+    coefs = result.coefficients
+    target = result.target_level
+
+    # Build the linear predictor string
+    intercept = coefs.loc[coefs['Term'] == 'const', 'Estimate'].values[0]
+    terms = [f"{intercept:.6f}"]
+    for _, row in coefs.iterrows():
+        if row['Term'] == 'const':
+            continue
+        terms.append(f"({row['Estimate']:.6f}) * {row['Term']}")
+    logit_expr = " + ".join(terms)
+
+    lines = []
+    lines.append("Probability Formula (Save Probability Formula)")
+    lines.append("=" * 60)
+    lines.append(f"  logit(P) = {logit_expr}")
+    lines.append("")
+    lines.append(f"  P({target}) = 1 / (1 + exp(-({logit_expr})))")
+
+    formula = "\n".join(lines)
+    if verbose:
+        print(formula)
+    return formula
+
+
 def plot_logistic_diagnostics(
     result: LogisticRegressionResults,
     figsize: Tuple[int, int] = (15, 10)
@@ -10996,7 +11051,12 @@ def plot_binary_smooth(
 
     if smoother == 'lowess':
         from statsmodels.nonparametric.smoothers_lowess import lowess as _lowess
-        smoothed = _lowess(y_arr, x_arr, frac=frac, return_sorted=True)
+        # it=0 disables robustification iterations.  For binary (0/1) data
+        # with severe class imbalance the default bisquare reweighting
+        # (it=3) treats the rare "1" observations as outliers and drives
+        # the smooth to zero — a known LOWESS pitfall.  JMP's Kernel
+        # Smoother does not apply robustification for binary outcomes.
+        smoothed = _lowess(y_arr, x_arr, frac=frac, it=0, return_sorted=True)
         smooth_x, smooth_y = smoothed[:, 0], smoothed[:, 1]
         smooth_label = f'LOWESS (frac={frac})'
     elif smoother == 'spline':
@@ -11104,6 +11164,88 @@ def plot_binary_smooth(
     plt.tight_layout()
     plt.show()
     return fig
+
+
+# ── Scatterplot Matrix ──────────────────────────────────────────────────────
+
+def plot_scatterplot_matrix(df, variables=None, hue=None,
+                            diag_kind='hist', title=None,
+                            figsize=(12, 10), interactive=False):
+    """
+    JMP-style scatterplot matrix (pairwise scatter + diagonal distributions).
+
+    Produces an NxN grid where off-diagonal panels show bivariate scatter
+    plots and diagonal panels show univariate histograms or KDE curves.
+    Useful for spotting nonlinear associations that a correlation coefficient
+    alone cannot reveal.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input data.
+    variables : list of str, optional
+        Columns to include. If None, all numeric columns are used
+        (capped at 10 to keep the plot readable).
+    hue : str, optional
+        Column name used to color points by group.
+    diag_kind : {'hist', 'kde'}, default 'hist'
+        Type of plot on the diagonal.
+    title : str, optional
+        Super-title for the figure.
+    figsize : tuple, default (12, 10)
+        Figure size (matplotlib / seaborn only).
+    interactive : bool, default False
+        If True, return an interactive Plotly figure. Requires plotly.
+
+    Returns
+    -------
+    matplotlib.figure.Figure, plotly.graph_objects.Figure, or None
+    """
+    # ── select variables ────────────────────────────────────────────────
+    if variables is None:
+        variables = df.select_dtypes(include='number').columns.tolist()
+        if len(variables) > 10:
+            variables = variables[:10]
+            print(f"Auto-selected first 10 numeric columns: {variables}")
+    missing_cols = [c for c in variables if c not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Columns not in DataFrame: {missing_cols}")
+
+    plot_df = df[variables + ([hue] if hue and hue not in variables else [])].dropna()
+
+    # ── interactive (Plotly) path ───────────────────────────────────────
+    if interactive:
+        _require_plotly('plot_scatterplot_matrix')
+        fig = px.scatter_matrix(
+            plot_df,
+            dimensions=variables,
+            color=hue,
+            title=title or 'Scatterplot Matrix',
+            opacity=0.5,
+        )
+        fig.update_traces(diagonal_visible=True, marker=dict(size=3))
+        fig.update_layout(width=900, height=900)
+        fig.show()
+        return fig
+
+    # ── static (seaborn / matplotlib) path ──────────────────────────────
+    if not HAS_SEABORN:
+        raise ImportError("seaborn is required for static scatterplot matrix. "
+                          "Install it or use interactive=True for Plotly.")
+
+    g = sns.pairplot(
+        plot_df,
+        vars=variables,
+        hue=hue,
+        diag_kind=diag_kind,
+        plot_kws=dict(alpha=0.4, s=10, edgecolor='none'),
+        height=figsize[1] / max(len(variables), 1),
+    )
+    g.figure.suptitle(title or 'Scatterplot Matrix', y=1.02, fontsize=14)
+    g.figure.set_size_inches(*figsize)
+    plt.tight_layout()
+    plt.show()
+    return g.figure
 
 
 def ci_mean(data, level=0.95, decimals=2, verbose=True):
@@ -11756,6 +11898,81 @@ def lift_at_percentile(
     return info
 
 
+def compare_logistic_models(
+    models: list,
+    names: list = None,
+    verbose: bool = True
+) -> pd.DataFrame:
+    """
+    Compare multiple fitted logistic regression models in a summary table.
+
+    Produces a JMP-style comparison showing key fit statistics side-by-side,
+    similar to JMP's **Fit Model** comparison output.
+
+    Parameters
+    ----------
+    models : list of LogisticRegressionResults
+        Fitted logistic regression results from ``logistic_regression()``.
+    names : list of str, optional
+        Display names for each model.  Defaults to ``Model 1``, ``Model 2``, …
+    verbose : bool, default True
+        Print a formatted comparison table.
+
+    Returns
+    -------
+    pd.DataFrame
+        Comparison table with columns: Model, N, -LogLikelihood, DF,
+        LR ChiSquare, Prob>ChiSq, R²(U), AIC, BIC, AUC.
+
+    Examples
+    --------
+    >>> df = jmp.compare_logistic_models(
+    ...     [cr_model, age_model, intercept_model],
+    ...     names=['Compa Ratio', 'Age', 'Intercept-only']
+    ... )
+    """
+    if names is None:
+        names = [f"Model {i+1}" for i in range(len(models))]
+
+    rows = []
+    for name, m in zip(names, models):
+        rows.append({
+            'Model': name,
+            'N': m.n_obs,
+            '-LogLikelihood': -m.log_likelihood,
+            'DF': m.lr_df,
+            'LR ChiSquare': m.likelihood_ratio_chisq,
+            'Prob>ChiSq': m.lr_pvalue,
+            'R²(U)': m.rsquare_u,
+            'AIC': m.aic,
+            'BIC': m.bic,
+            'AUC': m.auc,
+        })
+
+    df = pd.DataFrame(rows)
+
+    if verbose:
+        print("Logistic Model Comparison")
+        print("=" * 100)
+        # Format for aligned printing
+        fmt = (
+            f"{'Model':<20} {'N':>6} {'-LogLik':>12} {'DF':>4} "
+            f"{'LR ChiSq':>10} {'Prob>ChiSq':>11} {'R²(U)':>8} "
+            f"{'AIC':>10} {'BIC':>10} {'AUC':>8}"
+        )
+        print(fmt)
+        print("-" * 100)
+        for _, r in df.iterrows():
+            print(
+                f"{r['Model']:<20} {r['N']:>6} {r['-LogLikelihood']:>12.2f} "
+                f"{r['DF']:>4} {r['LR ChiSquare']:>10.2f} "
+                f"{r['Prob>ChiSq']:>11.6f} {r['R²(U)']:>8.4f} "
+                f"{r['AIC']:>10.2f} {r['BIC']:>10.2f} {r['AUC']:>8.4f}"
+            )
+
+    return df
+
+
 def predict_logistic_at(
     result,  # LogisticRegressionResults
     verbose: bool = True,
@@ -11895,7 +12112,7 @@ def event_rate_by_group(
 # MODULE EXPORTS
 # =============================================================================
 
-__version__ = "2.9.0"
+__version__ = "2.11.0"
 __all__ = [
     # Data classes
     'DescriptiveStats', 'NormalityTest', 'RegressionResults', 'ResidualDiagnostics',
@@ -11966,7 +12183,9 @@ __all__ = [
     # NEW v2.5.0: Logistic Regression
     'LogisticRegressionResults', 'logistic_regression', 'plot_logistic_diagnostics',
     'plot_logistic_bivariate', 'plot_logistic_roc', 'roc_curve', 'confusion_matrix_stats',
-    'save_logistic_predictions',
+    'save_logistic_predictions', 'print_probability_formula',
+    'logistic_decile_analysis', 'plot_logistic_lift',
+    'plot_logistic_calibration', 'plot_logistic_spline_comparison',
 
     # NEW v2.6.0: Decision Trees (Partition)
     'DecisionTreeResult', 'decision_tree', 'decision_tree_classification',
@@ -11981,8 +12200,11 @@ __all__ = [
     'confusion_matrix_at_cutoff', 'plot_binary_smooth',
 
     # NEW v2.9.0: EDA & Model Evaluation Utilities
-    'missing_summary', 'lift_at_percentile', 'predict_logistic_at',
-    'event_rate_by_group',
+    'missing_summary', 'lift_at_percentile', 'compare_logistic_models',
+    'predict_logistic_at', 'event_rate_by_group',
+
+    # NEW v2.10.0: Scatterplot Matrix
+    'plot_scatterplot_matrix',
 
     # Utilities
     'detect_outliers', 'recode', 'log_transform',
